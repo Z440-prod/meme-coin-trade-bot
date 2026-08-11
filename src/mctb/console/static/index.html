@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCTB Console</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --panel-2: #1a1f2e; --border: #252b3b;
+    --text: #d7dce8; --muted: #7d879c; --green: #26a69a; --red: #ef5350;
+    --amber: #ffa726; --blue: #42a5f5; --purple: #ab47bc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 12px; line-height: 1.5;
+  }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+  .grid { display: grid; gap: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 6px; padding: 12px; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .muted { color: var(--muted); }
+
+  /* Header */
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+           background: var(--panel); border: 1px solid var(--border);
+           border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; }
+  .brand { font-size: 15px; font-weight: 700; letter-spacing: .05em; }
+  .stat { display: flex; flex-direction: column; }
+  .stat .label { font-size: 10px; text-transform: uppercase; color: var(--muted);
+                 letter-spacing: .06em; }
+  .stat .value { font-size: 16px; font-weight: 600; }
+  .spacer { flex: 1; }
+  .badge { padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 700;
+           text-transform: uppercase; letter-spacing: .05em; }
+  .badge.paper { background: #1e3a5f; color: var(--blue); }
+  .badge.live  { background: #5f1e1e; color: var(--red); animation: pulse 2s infinite; }
+  .badge.halted{ background: #5f4a1e; color: var(--amber); }
+  @keyframes pulse { 50% { opacity: .55; } }
+
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         margin-right: 5px; vertical-align: middle; }
+  .dot.ok { background: var(--green); } .dot.bad { background: var(--red); }
+  .dot.warn { background: var(--amber); }
+
+  button { background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+           border-radius: 4px; padding: 6px 12px; cursor: pointer; font-family: inherit;
+           font-size: 12px; }
+  button:hover { background: #232a3d; }
+  button.danger { background: #5f1e1e; border-color: #7a2626; color: #ffcdd2; }
+  button.danger:hover { background: #7a2626; }
+  button.warn { background: #5f4a1e; border-color: #7a5f26; color: #ffe0b2; }
+  button.small { padding: 3px 8px; font-size: 11px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 10px; text-transform: uppercase; color: var(--muted);
+       padding: 4px 8px; border-bottom: 1px solid var(--border); letter-spacing: .05em;
+       font-weight: 600; }
+  td { padding: 5px 8px; border-bottom: 1px solid #1c2130; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .feed { max-height: 320px; overflow-y: auto; }
+  .feed::-webkit-scrollbar { width: 6px; }
+  .feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .row { padding: 5px 6px; border-bottom: 1px solid #1c2130; display: flex; gap: 8px;
+         align-items: baseline; }
+  .row .time { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+  .row .body { flex: 1; word-break: break-word; }
+  .tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 600;
+         flex-shrink: 0; }
+  .tag.buy { background: #14372f; color: var(--green); }
+  .tag.sell{ background: #3d1f1f; color: var(--red); }
+  .tag.skip{ background: #24293a; color: var(--muted); }
+  .tag.crit{ background: #5f1e1e; color: #ffcdd2; }
+  .tag.warn{ background: #5f4a1e; color: #ffe0b2; }
+  .tag.info{ background: #1e3a5f; color: #bbdefb; }
+
+  .bar { height: 4px; background: var(--panel-2); border-radius: 2px; overflow: hidden;
+         margin-top: 3px; }
+  .bar > div { height: 100%; background: var(--green); }
+
+  pre { white-space: pre-wrap; font-size: 11px; color: var(--muted);
+        max-height: 200px; overflow-y: auto; }
+
+  .empty { color: var(--muted); font-style: italic; padding: 14px; text-align: center; }
+  @media (min-width: 1100px) { .cols { grid-template-columns: 3fr 2fr; } }
+  @media (min-width: 1400px) { .cols3 { grid-template-columns: 1fr 1fr 1fr; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">MCTB</div>
+  <span id="mode" class="badge paper">paper</span>
+  <div class="stat"><span class="label">Equity</span><span class="value" id="equity">—</span></div>
+  <div class="stat"><span class="label">Today</span><span class="value" id="daily">—</span></div>
+  <div class="stat"><span class="label">Unrealised</span><span class="value" id="unreal">—</span></div>
+  <div class="stat"><span class="label">Open</span><span class="value" id="openct">0</span></div>
+  <div class="stat"><span class="label">W / L</span><span class="value" id="wl">0 / 0</span></div>
+  <div class="spacer"></div>
+  <div id="services" class="muted" style="font-size:11px"></div>
+  <button id="killBtn" class="danger">KILL</button>
+  <button id="resumeBtn" class="warn">Resume</button>
+  <button id="closeAllBtn" class="danger">Close all</button>
+</header>
+
+<div id="haltBanner" class="panel" style="display:none;border-color:#7a5f26;background:#2a2416;margin-bottom:12px">
+  <strong style="color:var(--amber)">TRADING HALTED</strong> — <span id="haltReason"></span>
+</div>
+
+<div class="grid cols" style="margin-bottom:12px">
+  <div class="panel">
+    <h2>Open positions</h2>
+    <div id="positions"><div class="empty">No open positions</div></div>
+  </div>
+  <div class="panel">
+    <h2>Performance (closed trades)</h2>
+    <div id="perf"><div class="empty">No closed trades yet</div></div>
+  </div>
+</div>
+
+<div class="grid cols3" style="margin-bottom:12px">
+  <div class="panel">
+    <h2>Decisions</h2>
+    <div class="feed" id="decisions"><div class="empty">Waiting…</div></div>
+  </div>
+  <div class="panel">
+    <h2>Fills</h2>
+    <div class="feed" id="fills"><div class="empty">Waiting…</div></div>
+  </div>
+  <div class="panel">
+    <h2>Alerts</h2>
+    <div class="feed" id="alerts"><div class="empty">Quiet</div></div>
+  </div>
+</div>
+
+<div class="grid cols" style="margin-bottom:12px">
+  <div class="panel">
+    <h2>Learned edge — what actually pays, from your own trades</h2>
+    <div id="edge"><div class="empty">Needs closed trades before it can learn anything</div></div>
+  </div>
+  <div class="panel">
+    <h2>Tracked wallets</h2>
+    <div id="wallets"><div class="empty">None yet</div></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>LLM notes</h2>
+  <div id="llm"><div class="empty">Nothing yet — the nightly review appears here</div></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = (n, d = 4) => (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toFixed(d);
+const sign = (n, d = 4) => (n >= 0 ? '+' : '') + fmt(n, d);
+const cls  = n => n > 0 ? 'pos' : (n < 0 ? 'neg' : 'muted');
+const esc  = s => String(s ?? '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+const clock = ts => new Date((ts || Date.now() / 1000) * 1000).toLocaleTimeString();
+const short = m => (m || '').slice(0, 8);
+
+let state = { decisions: [], fills: [], alerts: [], llm_notes: [] };
+
+/* ---------- rendering ---------- */
+
+function renderSnapshot(s) {
+  if (!s) return;
+  const equity = s.bankroll_sol + s.positions.reduce((a, p) => a + (p.tokens_held * p.current_price_sol), 0);
+  $('equity').textContent = fmt(equity) + ' SOL';
+  $('daily').textContent = sign(s.daily_pnl_sol);
+  $('daily').className = 'value ' + cls(s.daily_pnl_sol);
+  $('unreal').textContent = sign(s.unrealised_pnl_sol);
+  $('unreal').className = 'value ' + cls(s.unrealised_pnl_sol);
+  $('openct').textContent = s.positions.length;
+  $('wl').textContent = `${s.wins_today} / ${s.losses_today}`;
+
+  const mode = $('mode');
+  mode.textContent = s.halted ? 'halted' : s.mode;
+  mode.className = 'badge ' + (s.halted ? 'halted' : s.mode);
+
+  $('haltBanner').style.display = s.halted ? 'block' : 'none';
+  $('haltReason').textContent = s.halt_reason || 'unknown reason';
+
+  renderPositions(s.positions);
+  renderWallets(s.top_wallets || []);
+}
+
+function renderPositions(positions) {
+  const el = $('positions');
+  if (!positions.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+
+  el.innerHTML = `<table><thead><tr>
+      <th>Token</th><th class="num">Mult</th><th class="num">P&amp;L</th>
+      <th class="num">Cost</th><th class="num">Value</th><th class="num">Age</th>
+      <th>State</th><th></th></tr></thead><tbody>` +
+    positions.map(p => {
+      const mult  = p.entry_price_sol > 0 ? p.current_price_sol / p.entry_price_sol : 1;
+      const value = p.tokens_held * p.current_price_sol;
+      const costLeft = p.tokens_bought > 0 ? p.cost_sol * (p.tokens_held / p.tokens_bought) : 0;
+      const pnl   = p.realised_sol + value - p.cost_sol - p.fees_sol;
+      const age   = Math.round((Date.now() / 1000) - p.opened_at);
+      const rungs = (p.ladder_filled || []).length;
+      return `<tr>
+        <td><strong>${esc(p.symbol || short(p.mint))}</strong>
+            ${p.trailing_armed ? '<span class="tag info">trail</span>' : ''}
+            ${rungs ? `<span class="tag buy">${rungs} sold</span>` : ''}</td>
+        <td class="num ${cls(mult - 1)}">${fmt(mult, 2)}x</td>
+        <td class="num ${cls(pnl)}">${sign(pnl)}</td>
+        <td class="num muted">${fmt(costLeft, 4)}</td>
+        <td class="num">${fmt(value, 4)}</td>
+        <td class="num muted">${age}s</td>
+        <td class="muted">${esc(p.state)}</td>
+        <td><button class="small danger" onclick="closePos('${esc(p.mint)}')">Exit</button></td>
+      </tr>`;
+    }).join('') + '</tbody></table>';
+}
+
+function renderPerf(p) {
+  const el = $('perf');
+  if (!p || !p.trades) { el.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
+  const pf = p.profit_factor === null || !isFinite(p.profit_factor) ? '∞' : fmt(p.profit_factor, 2);
+  const rows = [
+    ['Trades', p.trades],
+    ['Win rate', (p.win_rate * 100).toFixed(1) + '%'],
+    ['Total P&L', `<span class="${cls(p.total_pnl_sol)}">${sign(p.total_pnl_sol)} SOL</span>`],
+    ['Profit factor', pf],
+    ['Max drawdown', fmt(p.max_drawdown_sol) + ' SOL'],
+    ['Sharpe / trade', fmt(p.sharpe_per_trade, 2)],
+    ['Best / worst', `<span class="pos">${sign(p.best_sol)}</span> / <span class="neg">${sign(p.worst_sol)}</span>`],
+    ['Avg hold', Math.round(p.avg_hold_s) + 's'],
+    ['Fees paid', fmt(p.total_fees_sol) + ' SOL'],
+  ];
+  el.innerHTML = '<table><tbody>' + rows.map(([k, v]) =>
+    `<tr><td class="muted">${k}</td><td class="num">${v}</td></tr>`).join('') + '</tbody></table>';
+}
+
+function renderEdge(rows) {
+  const el = $('edge');
+  if (!rows || !rows.length) {
+    el.innerHTML = '<div class="empty">Needs closed trades before it can learn anything</div>';
+    return;
+  }
+  el.innerHTML = `<table><thead><tr><th>Feature</th><th>Bucket</th>
+      <th class="num">N</th><th class="num">Win</th><th class="num">Avg P&amp;L</th>
+      </tr></thead><tbody>` +
+    rows.slice(0, 14).map(r => `<tr>
+      <td class="muted">${esc(r.feature)}</td>
+      <td><strong>${esc(r.bucket)}</strong></td>
+      <td class="num muted">${r.trades}</td>
+      <td class="num">${(r.win_rate * 100).toFixed(0)}%</td>
+      <td class="num ${cls(r.avg_pnl_pct)}">${r.avg_pnl_pct >= 0 ? '+' : ''}${fmt(r.avg_pnl_pct, 1)}%</td>
+    </tr>`).join('') + '</tbody></table>';
+}
+
+function renderWallets(wallets) {
+  const el = $('wallets');
+  if (!wallets.length) { el.innerHTML = '<div class="empty">None yet</div>'; return; }
+  el.innerHTML = `<table><thead><tr><th>Wallet</th><th class="num">Score</th>
+      <th class="num">W/L</th><th class="num">Copies</th><th class="num">P&amp;L</th>
+      </tr></thead><tbody>` +
+    wallets.map(w => `<tr>
+      <td>${short(w.address)}… ${w.seeded ? '<span class="tag info">seed</span>' : ''}</td>
+      <td class="num"><strong>${fmt(w.score, 2)}</strong>
+          <div class="bar"><div style="width:${(w.score * 100).toFixed(0)}%"></div></div></td>
+      <td class="num muted">${w.wins}/${w.losses}</td>
+      <td class="num muted">${w.copied_trades}</td>
+      <td class="num ${cls(w.copied_pnl_sol)}">${sign(w.copied_pnl_sol, 3)}</td>
+    </tr>`).join('') + '</tbody></table>';
+}
+
+function renderFeed(elId, items, fmtFn, emptyMsg) {
+  const el = $(elId);
+  if (!items.length) { el.innerHTML = `<div class="empty">${emptyMsg}</div>`; return; }
+  el.innerHTML = items.slice().reverse().slice(0, 40).map(fmtFn).join('');
+}
+
+const decisionRow = d => `<div class="row">
+  <span class="time">${clock(d.ts)}</span>
+  <span class="tag ${d.action === 'buy' ? 'buy' : 'skip'}">${d.action}</span>
+  <span class="body"><strong>${esc(d.symbol || short(d.mint))}</strong>
+    <span class="muted">${fmt(d.score, 1)}</span>
+    ${d.action === 'buy' ? `<span class="pos">${fmt(d.size_sol)} SOL</span>` : ''}
+    <span class="muted">— ${esc((d.reason || '').slice(0, 90))}</span></span></div>`;
+
+const fillRow = f => `<div class="row">
+  <span class="time">${clock(f.ts)}</span>
+  <span class="tag ${f.side === 'buy' ? 'buy' : 'sell'}">${f.side}</span>
+  <span class="body"><strong>${esc(f.symbol || short(f.mint))}</strong>
+    ${f.ok ? `<span class="${f.side === 'buy' ? '' : 'pos'}">${fmt(f.sol_amount)} SOL</span>` : '<span class="neg">FAILED</span>'}
+    ${f.exit_reason ? `<span class="muted">${esc(f.exit_reason)}</span>` : ''}
+    ${f.error ? `<span class="neg">${esc(f.error.slice(0, 70))}</span>` : ''}
+    ${f.paper ? '' : '<span class="tag crit">LIVE</span>'}</span></div>`;
+
+const alertRow = a => `<div class="row">
+  <span class="time">${clock(a.ts)}</span>
+  <span class="tag ${a.level === 'critical' ? 'crit' : a.level === 'warning' ? 'warn' : 'info'}">${a.level}</span>
+  <span class="body"><strong>${esc(a.title)}</strong> ${esc(a.message)}</span></div>`;
+
+function renderLLM(notes) {
+  const el = $('llm');
+  if (!notes.length) { el.innerHTML = '<div class="empty">Nothing yet — the nightly review appears here</div>'; return; }
+  el.innerHTML = notes.slice().reverse().slice(0, 4).map(n =>
+    `<div style="margin-bottom:10px">
+       <div class="muted" style="font-size:11px">${clock(n.ts)} · ${esc(n.kind)}</div>
+       <pre>${esc(n.text)}</pre></div>`).join('');
+}
+
+function renderServices(hb) {
+  const now = Date.now() / 1000;
+  $('services').innerHTML = ['scout', 'brain'].map(name => {
+    const h = (hb || {})[name];
+    if (!h) return `<span class="dot bad"></span>${name}: never seen`;
+    const age = now - h.ts;
+    const klass = age > 30 ? 'bad' : (h.healthy ? 'ok' : 'warn');
+    return `<span class="dot ${klass}"></span>${name}: ${age.toFixed(0)}s`;
+  }).join(' &nbsp; ');
+}
+
+function renderAll() {
+  renderSnapshot(state.snapshot);
+  renderPerf(state.performance);
+  renderEdge(state.edge_table);
+  renderFeed('decisions', state.decisions, decisionRow, 'Waiting…');
+  renderFeed('fills', state.fills, fillRow, 'Waiting…');
+  renderFeed('alerts', state.alerts, alertRow, 'Quiet');
+  renderLLM(state.llm_notes || []);
+  renderServices(state.heartbeats);
+}
+
+/* ---------- controls ---------- */
+
+async function post(path) {
+  try { await fetch(path, { method: 'POST' }); }
+  catch (e) { alert('Command failed: ' + e); }
+}
+window.closePos = m => { if (confirm('Sell this position at market now?')) post('/api/control/close_position?mint=' + encodeURIComponent(m)); };
+$('killBtn').onclick     = () => { if (confirm('Engage kill switch? This stops all new entries. Open positions keep their exit rules.')) post('/api/control/kill'); };
+$('resumeBtn').onclick   = () => post('/api/control/resume');
+$('closeAllBtn').onclick = () => { if (confirm('Sell EVERY open position at market right now?')) post('/api/control/close_all'); };
+
+/* ---------- websocket ---------- */
+
+let ws, retry = 1000;
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+
+  ws.onopen = () => { retry = 1000; setInterval(() => { if (ws.readyState === 1) ws.send('ping'); }, 20000); };
+
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'init') { state = msg.data; renderAll(); return; }
+    if (msg.type === 'snapshot') { state.snapshot = msg.data; renderSnapshot(msg.data); return; }
+    if (msg.type === 'decision') { state.decisions.push(msg.data); if (state.decisions.length > 80) state.decisions.shift();
+                                   renderFeed('decisions', state.decisions, decisionRow, 'Waiting…'); return; }
+    if (msg.type === 'fill')     { state.fills.push(msg.data); if (state.fills.length > 80) state.fills.shift();
+                                   renderFeed('fills', state.fills, fillRow, 'Waiting…'); return; }
+    if (msg.type === 'alert')    { state.alerts.push(msg.data); if (state.alerts.length > 50) state.alerts.shift();
+                                   renderFeed('alerts', state.alerts, alertRow, 'Quiet'); return; }
+    if (msg.type === 'llm_note') { (state.llm_notes = state.llm_notes || []).push(msg.data); renderLLM(state.llm_notes); return; }
+  };
+
+  ws.onclose = () => { setTimeout(connect, retry); retry = Math.min(retry * 2, 15000); };
+  ws.onerror = () => ws.close();
+}
+connect();
+
+// Slower-moving analytics come from the REST endpoint.
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/state');
+    const d = await r.json();
+    state.performance = d.performance;
+    state.edge_table  = d.edge_table;
+    state.heartbeats  = d.heartbeats;
+    renderPerf(d.performance); renderEdge(d.edge_table); renderServices(d.heartbeats);
+  } catch (e) { /* dashboard keeps its last good state */ }
+}, 10000);
+</script>
+</body>
+</html>

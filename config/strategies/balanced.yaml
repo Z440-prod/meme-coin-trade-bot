@@ -1,0 +1,64 @@
+# =============================================================================
+#  BALANCED — the default.
+#
+#  Enters earlier than conservative and does not strictly require a tracked
+#  wallet, but still demands revoked authorities, sane holder distribution and
+#  genuine buy pressure. This is the preset most people should run once they
+#  have a few weeks of paper results.
+# =============================================================================
+
+gates:
+  min_age_s: 8.0
+  max_age_s: 900.0
+  min_sol_in_curve: 3.0
+  max_sol_in_curve: 85.0
+  min_unique_buyers: 8
+  min_buy_sell_ratio: 1.5
+  require_mint_authority_revoked: true
+  require_freeze_authority_revoked: true
+  max_dev_holding_pct: 0.05
+  max_top10_holding_pct: 0.35
+  max_bundle_pct: 0.20
+  block_known_rug_creators: true
+  require_smart_wallet: false
+  name_blocklist:
+    - "rug"
+    - "scam"
+
+scoring:
+  w_smart_wallets: 30.0
+  w_buy_pressure: 18.0
+  w_unique_buyers: 12.0
+  w_curve_progress: 10.0
+  w_holder_distribution: 12.0
+  w_social: 10.0
+  w_velocity: 15.0
+  w_creator_history: 8.0
+  entry_threshold: 62.0
+  personal_edge_enabled: true
+  personal_edge_max_adjust: 15.0
+  personal_edge_min_samples: 12
+
+risk:
+  max_position_sol: 0.05
+  position_pct_of_bankroll: 0.02
+  max_concurrent_positions: 3
+  max_positions_per_hour: 12
+  max_sol_deployed_per_hour: 0.4
+  daily_loss_limit_sol: 0.25
+  consecutive_loss_limit: 5
+
+exits:
+  stop_loss_pct: 0.35
+  take_profit_ladder:
+    - { multiple: 1.6, fraction: 0.34 }
+    - { multiple: 2.5, fraction: 0.33 }
+    - { multiple: 5.0, fraction: 0.20 }
+  trailing_activate_pct: 0.45
+  trailing_distance_pct: 0.25
+  max_hold_s: 900
+  stagnant_after_s: 240
+  stagnant_min_gain_pct: 0.10
+  exit_on_dev_sell: true
+  exit_on_smart_wallet_exit: true
+  stale_price_exit_s: 90

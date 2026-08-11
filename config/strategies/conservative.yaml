@@ -1,0 +1,72 @@
+# =============================================================================
+#  CONSERVATIVE — start here.
+#
+#  Waits for a launch to prove itself before entering: real buyer count, clean
+#  holder distribution, and at least one wallet you trust already in. Takes
+#  far fewer trades, and most of what it skips would have lost money.
+#
+#  Expect: few entries per day, lower variance, survives long enough to learn.
+# =============================================================================
+
+gates:
+  min_age_s: 25.0
+  max_age_s: 1200.0
+  min_sol_in_curve: 6.0
+  max_sol_in_curve: 60.0
+  min_unique_buyers: 20
+  min_buy_sell_ratio: 2.0
+  require_mint_authority_revoked: true
+  require_freeze_authority_revoked: true
+  max_dev_holding_pct: 0.03
+  max_top10_holding_pct: 0.25
+  max_bundle_pct: 0.12
+  block_known_rug_creators: true
+  # The single highest-value filter in the whole system: only buy what a
+  # wallet with a real track record has already bought.
+  require_smart_wallet: true
+  name_blocklist:
+    - "test"
+    - "rug"
+    - "scam"
+
+scoring:
+  w_smart_wallets: 38.0
+  w_buy_pressure: 16.0
+  w_unique_buyers: 14.0
+  w_curve_progress: 8.0
+  w_holder_distribution: 16.0
+  w_social: 6.0
+  w_velocity: 10.0
+  w_creator_history: 10.0
+  entry_threshold: 72.0
+  personal_edge_enabled: true
+  personal_edge_max_adjust: 12.0
+  personal_edge_min_samples: 15
+
+risk:
+  max_position_sol: 0.02
+  position_pct_of_bankroll: 0.01
+  max_concurrent_positions: 2
+  max_positions_per_hour: 4
+  max_sol_deployed_per_hour: 0.1
+  daily_loss_limit_sol: 0.08
+  consecutive_loss_limit: 3
+
+exits:
+  stop_loss_pct: 0.28
+  take_profit_ladder:
+    - { multiple: 1.5, fraction: 0.40 }
+    - { multiple: 2.2, fraction: 0.35 }
+    - { multiple: 4.0, fraction: 0.15 }
+  trailing_activate_pct: 0.35
+  trailing_distance_pct: 0.20
+  max_hold_s: 1200
+  stagnant_after_s: 300
+  stagnant_min_gain_pct: 0.08
+  exit_on_dev_sell: true
+  exit_on_smart_wallet_exit: true
+  stale_price_exit_s: 60
+
+execution:
+  buy_slippage_pct: 10.0
+  sell_slippage_pct: 25.0
