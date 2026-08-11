@@ -1,0 +1,132 @@
+# =============================================================================
+#  MCTB main configuration
+#
+#    cp config/config.example.yaml config/config.yaml
+#
+#  This file is merged ON TOP OF the strategy preset named below, so anything
+#  you set here wins. Secrets do NOT go here — they live in .env.
+#
+#  Copy the SAME config.yaml to all three devices. Each process only reads the
+#  sections it needs, and `role` is set per-device on the command line.
+# =============================================================================
+
+# Which tuning preset to start from: conservative | balanced | degen
+# Presets live in config/strategies/. Start with conservative.
+strategy_preset: balanced
+
+log_level: INFO
+
+# --- Execution ---------------------------------------------------------------
+execution:
+  # "paper" simulates every fill against live prices and risks nothing.
+  # Leave it here until your paper numbers are good over at least 100 trades.
+  mode: paper
+
+  # THE SECOND SAFETY LATCH. Real money requires mode: live AND this true.
+  # Two switches means one careless edit cannot arm your wallet.
+  live_trading_enabled: false
+
+  buy_slippage_pct: 15.0
+  sell_slippage_pct: 25.0
+  priority_fee_sol: 0.0008
+  exit_priority_fee_sol: 0.002
+  pool: auto
+
+  # Paper-mode realism. Do not set these to zero — a backtest with no fees or
+  # slippage will tell you a losing strategy is profitable.
+  paper_latency_ms: 400
+  paper_slippage_pct: 4.0
+  paper_fee_pct: 1.0
+  paper_starting_bankroll_sol: 1.0
+
+# --- Risk --------------------------------------------------------------------
+# Read docs/SAFETY.md before raising any of these.
+risk:
+  max_position_sol: 0.05
+  position_pct_of_bankroll: 0.02
+  min_sol_reserve: 0.05
+  max_concurrent_positions: 3
+  max_positions_per_hour: 12
+  max_sol_deployed_per_hour: 0.4
+  daily_loss_limit_sol: 0.25
+  consecutive_loss_limit: 5
+  cooldown_after_halt_s: 3600
+  same_mint_cooldown_s: 3600
+  kill_switch_file: ./KILL_SWITCH
+
+# --- Solana RPC --------------------------------------------------------------
+# URLs come from .env. Only behavioural settings live here.
+rpc:
+  timeout_s: 10.0
+  max_retries: 3
+  read_commitment: confirmed
+  price_commitment: processed
+
+# --- Copy trading ------------------------------------------------------------
+wallets:
+  enabled: true
+
+  # Wallets you already trust. These start with maximum weight.
+  # Find candidates on gmgn.ai / dexscreener / solscan, or let auto_discover
+  # build the list for you over a few days of running in paper mode.
+  seed_wallets: []
+  #  - "AArPXm8JatJiuyEffuC1un2Sc835SULa4uQqDcaGpAjV"
+
+  auto_discover: true
+  discovery_min_wins: 3
+  discovery_win_multiple: 3.0
+  discovery_max_entry_sol: 20.0
+  max_tracked_wallets: 150
+  # Metered PumpPortal subscriptions cost SOL. Cap what we subscribe to.
+  max_subscribed_wallets: 40
+
+# --- Social ------------------------------------------------------------------
+# Entirely optional. Without an X token the bot works fine, just without the
+# social feature. Do not pay for an X plan until you are actually profitable.
+social:
+  enabled: false
+  x_accounts: []
+  x_queries:
+    - "pump.fun"
+  poll_interval_s: 30
+  mention_ttl_s: 900
+  min_followers: 5000
+
+# --- Local LLM ---------------------------------------------------------------
+llm:
+  enabled: true
+  model: local
+  # The LLM is ADVISORY and off the hot path. If it is slow we trade without
+  # it. Never raise this above ~8s or you will miss every entry.
+  timeout_s: 6.0
+  max_tokens: 400
+  temperature: 0.2
+  # Only consult it for candidates that already scored this well.
+  min_score_to_consult: 55.0
+  # It can veto hard but it cannot manufacture conviction.
+  max_bonus: 12.0
+  max_penalty: 40.0
+  nightly_review: true
+  nightly_review_hour_utc: 4
+  # Leave false. Read the nightly report yourself before changing parameters.
+  auto_apply_tuning: false
+
+# --- Console (host PC) -------------------------------------------------------
+console:
+  host: 0.0.0.0
+  port: 8787
+  auto_open_browser: true
+  browser_url_template: "https://pump.fun/coin/{mint}"
+  brain_heartbeat_timeout_s: 20
+  # Backstop only — deliberately wider than the Brain's own stop, so it fires
+  # only when the Brain has actually failed.
+  supervisor_enabled: true
+  supervisor_stop_loss_pct: 0.50
+  desktop_notifications: true
+  telegram_alerts: false
+
+paths:
+  data_dir: ./data
+  log_dir: ./logs
+  db_file: ./data/mctb.db
+  keystore_path: ./secrets/trading.keystore

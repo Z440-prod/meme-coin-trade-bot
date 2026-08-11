@@ -1,0 +1,35 @@
+# Secrets — never commit these
+.env
+config/config.yaml
+config/wallets.yaml
+secrets/
+*.keystore
+*.key
+keypair*.json
+
+# Runtime state
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+KILL_SWITCH
+
+# Models (multi-GB)
+models/
+*.gguf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db

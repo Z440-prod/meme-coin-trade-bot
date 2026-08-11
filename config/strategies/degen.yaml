@@ -1,0 +1,85 @@
+# =============================================================================
+#  DEGEN — maximum aggression. Read this before you use it.
+#
+#  Enters seconds after launch on thin information. You WILL buy rugs. The
+#  thesis is that a small number of 10x+ runners pay for a long tail of total
+#  losses, which requires you to actually take every signal and to size small
+#  enough that a string of zeros does not end you.
+#
+#  Two things are still non-negotiable even here, because neither is a risk
+#  trade-off — they are simply unsellable positions:
+#    - mint authority revoked (or the dev prints infinite supply on top of you)
+#    - freeze authority revoked (or the dev freezes your account and you can
+#      never sell at any price)
+#
+#  Do not run this preset until conservative has been profitable on paper.
+# =============================================================================
+
+gates:
+  min_age_s: 3.0
+  max_age_s: 300.0
+  min_sol_in_curve: 1.2
+  max_sol_in_curve: 70.0
+  min_unique_buyers: 4
+  min_buy_sell_ratio: 1.15
+  require_mint_authority_revoked: true
+  require_freeze_authority_revoked: true
+  max_dev_holding_pct: 0.10
+  max_top10_holding_pct: 0.50
+  max_bundle_pct: 0.35
+  block_known_rug_creators: true
+  require_smart_wallet: false
+  name_blocklist: []
+
+scoring:
+  w_smart_wallets: 26.0
+  w_buy_pressure: 20.0
+  w_unique_buyers: 8.0
+  w_curve_progress: 8.0
+  w_holder_distribution: 8.0
+  w_social: 12.0
+  w_velocity: 24.0
+  w_creator_history: 6.0
+  entry_threshold: 52.0
+  personal_edge_enabled: true
+  personal_edge_max_adjust: 18.0
+  personal_edge_min_samples: 10
+
+risk:
+  # Note the position size does NOT go up with aggression — it goes DOWN.
+  # More shots, each one smaller. This is the only way a low-hit-rate,
+  # fat-tailed strategy survives its own losing streaks.
+  max_position_sol: 0.015
+  position_pct_of_bankroll: 0.008
+  max_concurrent_positions: 6
+  max_positions_per_hour: 40
+  max_sol_deployed_per_hour: 0.6
+  daily_loss_limit_sol: 0.3
+  consecutive_loss_limit: 10
+
+exits:
+  stop_loss_pct: 0.45
+  take_profit_ladder:
+    - { multiple: 2.0, fraction: 0.30 }
+    - { multiple: 4.0, fraction: 0.30 }
+    - { multiple: 10.0, fraction: 0.25 }
+  trailing_activate_pct: 0.60
+  trailing_distance_pct: 0.35
+  max_hold_s: 480
+  stagnant_after_s: 120
+  stagnant_min_gain_pct: 0.15
+  exit_on_dev_sell: true
+  exit_on_smart_wallet_exit: true
+  stale_price_exit_s: 45
+
+execution:
+  buy_slippage_pct: 20.0
+  sell_slippage_pct: 35.0
+  priority_fee_sol: 0.0015
+  exit_priority_fee_sol: 0.004
+
+llm:
+  # At this speed the LLM cannot keep up with entries; it still does the
+  # nightly review, which is where it earns its keep anyway.
+  min_score_to_consult: 70.0
+  timeout_s: 4.0

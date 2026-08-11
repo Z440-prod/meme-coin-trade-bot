@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mctb"
+version = "1.0.0"
+description = "Distributed memecoin sniping / copy-trading system for 2x Raspberry Pi + host PC"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "pydantic>=2.5,<3",
+    "PyYAML>=6.0",
+    "redis>=5.0",
+    "aiosqlite>=0.19",
+    "httpx>=0.26",
+    "websockets>=12.0",
+    "orjson>=3.9",
+    "rich>=13.7",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+# Needed on the Brain (RPi 2) only: signing + encrypted keystore.
+trade = [
+    "solders>=0.21",
+    "base58>=2.1",
+    "cryptography>=42.0",
+]
+# Needed on the Host PC (Console) only: dashboard.
+console = [
+    "fastapi>=0.109",
+    "uvicorn[standard]>=0.27",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+
+[project.scripts]
+mctb = "mctb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mctb = ["console/static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]
