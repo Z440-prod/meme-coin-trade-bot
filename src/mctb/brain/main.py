@@ -27,9 +27,11 @@ import logging
 import signal
 from datetime import datetime, timezone
 
+from ..automation import OutboundNotifier
 from ..bus import Bus
 from ..config import Config
 from ..db import Database
+from ..intel import EntityGraph, IntelEngine, NarrativeEngine
 from ..logging_setup import setup_logging
 from ..models import (
     Alert,
@@ -45,14 +47,18 @@ from ..models import (
     Topic,
     TradeEvent,
 )
+from ..providers import ProviderRegistry, Tier
+from ..runtime import LATENCY
 from ..scout.rpc_watcher import PriceOracle
 from ..scout.wallets import WalletTracker
 from ..solana.rpc import SolanaRPC
 from .edge import PersonalEdge
 from .executor import build_executor
 from .gates import RiskGate, apply_gates
+from .intel_gate import evaluate_intel, summarise
 from .llm import LLMAdvisor, validate_proposed_change
 from .portfolio import Portfolio
+from .router import ExecutionRouter
 from .scoring import Scorer
 
 log = logging.getLogger(__name__)
@@ -86,6 +92,23 @@ class Brain:
         self.llm = LLMAdvisor(config)
         self.wallets = WalletTracker(self.db, seed_wallets=config.wallets.seed_wallets)
 
+        # --- Intelligence stack --------------------------------------------
+        self.registry = ProviderRegistry(config)
+        self.graph = EntityGraph()
+        self.intel = IntelEngine(
+            self.registry, self.graph, NarrativeEngine(self.registry, config.intel.narrative_ttl_s)
+        )
+        self.router = ExecutionRouter(config, self.registry, self.rpc)
+        self.notifier = OutboundNotifier(
+            telegram_token=config.telegram_bot_token if config.alerts.telegram else None,
+            telegram_chat_id=config.telegram_chat_id if config.alerts.telegram else None,
+            discord_webhook=config.discord_webhook_url if config.alerts.discord else None,
+            generic_webhooks=config.alerts.webhooks,
+            min_interval_s=config.alerts.min_interval_s,
+            dedupe_window_s=config.alerts.dedupe_window_s,
+        )
+        self._intel_tasks: list[asyncio.Task] = []
+
         self.portfolio: Portfolio | None = None
         self._running = False
         self._kill_switch = False
@@ -107,6 +130,26 @@ class Brain:
         await self.edge.load()
         await self.wallets.load()
         await self.llm.connect()
+
+        # Providers and intel. All optional — a failure here degrades the
+        # system's information, never its ability to trade or exit.
+        if self.config.intel.enabled:
+            try:
+                self.registry.build()
+                await self.registry.start()
+                self._intel_tasks = await self.intel.start(
+                    workers=self.config.providers.enrich_workers
+                )
+                coverage = self.registry.coverage_report()
+                log.info(
+                    "intel online: %d/%d providers ready%s",
+                    coverage["ready"], coverage["total"],
+                    f", gaps: {', '.join(coverage['critical_gaps'])}"
+                    if coverage["critical_gaps"] else "",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error("intel stack failed to start (continuing without it): %s", exc)
+        await self.notifier.start()
 
         executor = await build_executor(self.config, self.rpc, self.oracle)
         self.portfolio = Portfolio(self.config, self.db, executor, self.oracle, self.edge)
@@ -140,7 +183,9 @@ class Brain:
             asyncio.create_task(self._snapshot_loop(), name="snapshot"),
             asyncio.create_task(self._maintenance_loop(), name="maintenance"),
             asyncio.create_task(self._review_loop(), name="review"),
+            asyncio.create_task(self._graph_loop(), name="graph"),
         ]
+        tasks.extend(self._intel_tasks)
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -165,6 +210,11 @@ class Brain:
                     open_count,
                 )
             await self.portfolio.executor.close()
+        self.intel.stop()
+        with contextlib.suppress(Exception):
+            await self.registry.close()
+        with contextlib.suppress(Exception):
+            await self.notifier.close()
         await self.llm.close()
         await self.rpc.close()
         await self.db.close()
@@ -239,8 +289,80 @@ class Brain:
             return
 
         # 2. Deterministic score — microseconds.
-        scored = self.scorer.score(candidate)
+        with LATENCY.timer("score"):
+            scored = self.scorer.score(candidate)
         breakdown = scored.breakdown
+
+        # 2b. Fused provider intelligence.
+        #
+        # Reads from the HOT path first — cache only, no network — so the
+        # common case adds microseconds. Only a candidate that already scores
+        # near the entry threshold is worth spending a network round trip on,
+        # and even then the budget is tight and a timeout simply means less
+        # information rather than a missed trade.
+        intel_verdict = None
+        if self.config.intel.enabled and self.registry.providers:
+            with LATENCY.timer("intel"):
+                dossier = self.intel.assemble_hot(candidate.mint, candidate.symbol)
+
+                near_threshold = (
+                    breakdown.final_score
+                    >= self.config.scoring.entry_threshold - 8.0
+                )
+                if near_threshold and not dossier.security.provenance.get("sources"):
+                    try:
+                        dossier = await self.intel.assemble(
+                            candidate.mint,
+                            candidate.symbol,
+                            tier=Tier.WARM,
+                            timeout_s=self.config.providers.warm_timeout_s,
+                            include_narrative=False,
+                            creator=candidate.creator,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("warm intel assembly failed for %s: %s", candidate.mint, exc)
+
+                intel_verdict = evaluate_intel(
+                    dossier,
+                    self.config,
+                    graph=self.graph,
+                    smart_wallets=candidate.smart_wallets,
+                )
+
+            if not intel_verdict.passed:
+                decision = Decision(
+                    source="brain",
+                    mint=candidate.mint,
+                    symbol=candidate.symbol,
+                    action="skip",
+                    score=breakdown.final_score,
+                    breakdown=breakdown,
+                    reason="; ".join(intel_verdict.blockers[:3]),
+                )
+                log.info(
+                    "intel blocked %s: %s",
+                    candidate.symbol or candidate.mint[:10],
+                    intel_verdict.blockers[0],
+                )
+                await self._publish_decision(decision)
+                return
+
+            if intel_verdict.adjustment:
+                breakdown.components["intel"] = round(intel_verdict.adjustment, 2)
+                breakdown.final_score = round(
+                    max(0.0, min(100.0, breakdown.final_score + intel_verdict.adjustment)), 2
+                )
+                breakdown.notes.append(summarise(intel_verdict, dossier))
+            for note in intel_verdict.notes[:3]:
+                breakdown.notes.append(note)
+
+            # Sybil collapse changes the meaning of the smart-wallet feature,
+            # so record what the consensus really was.
+            if intel_verdict.sybil_ratio > 0:
+                breakdown.notes.append(
+                    f"{len(candidate.smart_wallets)} wallets collapse to "
+                    f"{intel_verdict.effective_smart_wallets} distinct actors"
+                )
 
         # 3. LLM advisory, only if the score already qualifies. Bounded, and
         #    skipped entirely if it would delay us past the opportunity.
@@ -304,6 +426,40 @@ class Brain:
             return
 
         # 5. Go.
+        # 5. Pre-trade cost check.
+        #
+        # Two quotes and no gas, and it catches the case a contract scan
+        # cannot: a token you can buy but not sell. On a thin token the round
+        # trip alone can exceed 20%, which means the position needs a 20% move
+        # just to break even — worth knowing before committing, not after.
+        if self.config.intel.enabled and self.registry.get("jupiter"):
+            try:
+                estimate = await asyncio.wait_for(
+                    self.router.estimate_cost(candidate.mint, size), timeout=2.0
+                )
+                if not estimate.sellable:
+                    decision.action = "skip"
+                    decision.reason = f"no sell route: {estimate.reason}"
+                    log.warning(
+                        "REFUSED %s — buy route exists but sell route does not",
+                        candidate.symbol or candidate.mint[:10],
+                    )
+                    await self._publish_decision(decision)
+                    return
+                if estimate.round_trip_pct > self.config.intel.max_round_trip_cost_pct:
+                    decision.action = "skip"
+                    decision.reason = (
+                        f"round trip would cost {estimate.round_trip_pct:.0f}% "
+                        f"(limit {self.config.intel.max_round_trip_cost_pct:.0f}%)"
+                    )
+                    await self._publish_decision(decision)
+                    return
+                decision.breakdown.notes.append(
+                    f"round trip cost {estimate.round_trip_pct:.1f}%"
+                )
+            except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+                log.debug("cost estimate skipped for %s: %s", candidate.mint, exc)
+
         decision.action = "buy"
         decision.size_sol = size
         decision.reason = f"score {score:.1f} >= {threshold:.1f}"
@@ -398,6 +554,12 @@ class Brain:
                         self.portfolio.note_dev_sell(message.mint)
                     elif message.trader in position.smart_wallets:
                         self.portfolio.note_smart_exit(message.mint)
+                elif message.trader:
+                    # Feed the entity graph. Every observed buy is evidence
+                    # about who is coordinating with whom.
+                    self.graph.observe_buy(
+                        message.trader, message.mint, message.ts, message.sol_amount
+                    )
             except Exception as exc:  # noqa: BLE001
                 log.debug("market event handling error: %s", exc)
 
@@ -486,6 +648,13 @@ class Brain:
                             "halted": self.risk.halted or self._kill_switch,
                             "edge_trades": self.edge.trades_learned,
                             "llm": self.llm.stats(),
+                            "intel": self.intel.stats() if self.config.intel.enabled else {},
+                            "providers": self.registry.coverage_report()
+                            if self.registry.providers
+                            else {},
+                            "routes": self.router.stats(),
+                            "latency": LATENCY.report(),
+                            "alerts": self.notifier.stats(),
                         },
                     ),
                     journal=False,
@@ -509,6 +678,44 @@ class Brain:
                     await self.llm.probe()
             except Exception as exc:  # noqa: BLE001
                 log.debug("maintenance error: %s", exc)
+
+    # -- entity graph -------------------------------------------------------
+
+    async def _graph_loop(self) -> None:
+        """Keep the wallet-cluster graph fresh.
+
+        Funding lineage is what turns co-occurrence heuristics into real
+        entity resolution, and it needs a Helius key. Without one the graph
+        still clusters from co-buying behaviour, just less precisely.
+        """
+        while self._running:
+            await asyncio.sleep(self.config.intel.funding_resolve_interval_s)
+            if not self.config.intel.enabled or not self.config.intel.resolve_funding:
+                continue
+            try:
+                # Prioritise wallets we actually care about: tracked wallets
+                # and anyone holding something we hold.
+                candidates = [w.address for w in self.wallets.qualified()[:40]]
+                if self.portfolio:
+                    for position in self.portfolio.open_positions:
+                        candidates.extend(position.smart_wallets)
+
+                unresolved = [
+                    a for a in dict.fromkeys(candidates)
+                    if a not in self.graph.nodes or not self.graph.nodes[a].first_funder
+                ]
+                if unresolved:
+                    await self.intel.resolve_funding(
+                        unresolved, limit=self.config.intel.funding_resolve_batch
+                    )
+
+                self.graph.rebuild()
+                self.graph.prune()
+                self.intel.narrative.prune()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.debug("graph maintenance failed: %s", exc)
 
     # -- nightly review -----------------------------------------------------
 

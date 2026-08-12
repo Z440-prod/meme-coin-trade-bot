@@ -125,6 +125,107 @@ console:
   desktop_notifications: true
   telegram_alerts: false
 
+# --- External data providers -------------------------------------------------
+# API keys come from .env, never from here. This section is behaviour only.
+providers:
+  # Restrict to a subset. Empty = every provider that has what it needs.
+  enabled: []
+  # Never use these, even if a key exists.
+  disabled: []
+
+  # GMGN publishes no official API. These are undocumented internal endpoints
+  # behind bot protection: they can break or block without notice. Off by
+  # default; read docs/PROVIDERS.md before enabling.
+  gmgn_opt_in: false
+
+  # DEXTools encodes the plan in the URL path.
+  dextools_plan: trial
+
+  # Latency budgets. The WARM budget is the only one on a decision path —
+  # raising it makes you slower to enter, not smarter.
+  warm_timeout_s: 0.4
+  cold_timeout_s: 3.0
+  # Background enrichment workers. 3 keeps a Pi comfortable.
+  enrich_workers: 3
+
+# --- Intelligence fusion -----------------------------------------------------
+intel:
+  enabled: true
+
+  # Entity resolution: collapse wallets that are really one actor before
+  # counting them as independent confirmations. The single highest-value
+  # setting in this file — it removes a whole class of manufactured signal.
+  entity_resolution: true
+  # Funding lineage needs a Helius key. Without one the graph still clusters
+  # from co-buying behaviour, just less precisely.
+  resolve_funding: true
+  funding_resolve_interval_s: 120
+  funding_resolve_batch: 20
+
+  # Reject when this share of apparent consensus is one clustered entity.
+  max_sybil_ratio: 0.5
+  # Reject when this share of buyers are wallets created in the last 24h.
+  max_fresh_wallet_ratio: 0.75
+  # Reject when this share of buyers look like deployer insiders.
+  max_insider_ratio: 0.25
+
+  # Reject when volume looks manufactured (see fusion.py for the heuristic).
+  max_wash_suspicion: 0.7
+  # Reject when a round trip would cost more than this. On a thin token this
+  # routinely exceeds 20%, meaning the trade needs a 20% move to break even.
+  max_round_trip_cost_pct: 25.0
+  # Require a live sell route before buying. Catches honeypots that pass every
+  # contract check — leave this on.
+  require_sellable: true
+
+  # Above this score, social evidence counts AGAINST a token.
+  astroturf_threshold: 0.5
+  narrative_ttl_s: 1800
+
+  # How far fused intel may move a score. Bounded like every other adjustment.
+  max_intel_bonus: 12.0
+  max_intel_penalty: 35.0
+
+# --- Outbound alerts ---------------------------------------------------------
+alerts:
+  enabled: true
+  # Enabled automatically when the matching keys are present in .env.
+  telegram: false
+  discord: false
+  # Generic JSON POST targets — Zapier catch hooks, n8n webhook nodes, etc.
+  webhooks: []
+
+  on_entry: true
+  on_exit: true
+  on_big_win: true
+  on_big_loss: true
+  on_halt: true
+  on_provider_failure: true
+  big_move_pct: 0.5
+
+  min_interval_s: 1.0
+  dedupe_window_s: 60
+
+# --- Inbound webhooks (TradingView / Zapier / n8n) ---------------------------
+webhooks:
+  enabled: false
+  # Set MCTB_WEBHOOK_SECRET in .env. It is both the URL path and the HMAC key.
+  secret: ""
+  # Whether an inbound message may open or close positions.
+  # OFF by default. Anything that can move money should be a deliberate choice,
+  # and enabling this without a secret is refused at startup.
+  allow_trading: false
+  # Whether it may engage the kill switch. Safe to leave on — it only stops.
+  allow_kill: true
+  max_age_s: 300
+  # Restrict source IPs. TradingView publishes its ranges; leave empty for any.
+  allowed_ips: []
+
+# --- Runtime tuning ----------------------------------------------------------
+# uvloop is a 2-4x faster event loop, installed with: pip install uvloop
+use_uvloop: true
+tune_gc: true
+
 paths:
   data_dir: ./data
   log_dir: ./logs

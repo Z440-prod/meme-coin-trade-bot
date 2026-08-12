@@ -1,198 +1,214 @@
-# MCTB — Memecoin Trading Bot
+# MCTB — Memecoin Trading Terminal
 
-A distributed pump.fun sniping and copy-trading system for **two Raspberry Pis
-and a host PC**, with a local LLM advisor and a learning layer that adapts to
-your own results.
+An intelligence and execution platform for Solana memecoins, running on **two
+Raspberry Pis and a host PC**.
 
-Built from [the design brief in `docs/REALITY_CHECK.md`](docs/REALITY_CHECK.md),
-with several of its specifics corrected — pump.fun has no official API, X has
-no WebSocket, and an LLM cannot make a trade decision in the few seconds a
-launch is worth entering. That document explains every deviation.
+Fuses 20+ data sources into one cross-checked view, resolves which wallets are
+secretly the same actor, screens every token for the things that make it
+unsellable, routes execution through Jupiter, and learns from your own trade
+history — with a keyboard-driven terminal on top.
+
+```
+mctb token <mint>          →  full dossier: security, market, entity graph, 12 links
+mctb providers             →  what every data source can currently answer
+mctb console               →  the terminal at :8787/terminal
+```
 
 ---
 
 > ### Read this first
 >
-> **Most memecoin snipe bots lose money.** You are competing against co-located
+> **Most memecoin bots lose money.** You are competing against co-located
 > servers with direct validator access and sub-10ms latency, from a Raspberry
-> Pi behind a home router. On any trade decided by speed, you lose by default.
+> Pi behind a home router. On any trade decided purely by speed, you lose.
 >
-> This system is built to trade a *slower* edge competently: copy wallets with
-> a demonstrated record, screen out tokens that were never sellable, size so a
-> losing streak cannot end you, exit mechanically, and learn from your own
-> results. That is a real strategy. It is not a guaranteed one.
+> This system does not try to win that race. It competes on **information and
+> discipline**: seeing things other bots do not check, refusing trades that
+> cannot be exited, sizing so a losing streak cannot end you, and learning
+> from your own results rather than generic advice.
 >
-> **It ships in paper mode and needs two separate switches to touch real
-> money.** Assume you will lose whatever you fund it with, and fund it
-> accordingly. [SAFETY.md](docs/SAFETY.md) is not optional reading.
+> That is a real edge. It is not a guaranteed one. It ships in paper mode,
+> needs two separate switches to touch real money, and
+> [SAFETY.md](docs/SAFETY.md) is not optional reading.
 
 ---
 
-## What it does
+## What it actually does that other bots don't
 
-- **Watches every pump.fun launch** through two independent data paths, so no
-  single provider can blind it.
-- **Screens each token on chain** for the things that make a position
-  unsellable — live mint authority, live freeze authority (the classic
-  honeypot), concentrated holders, bundled launches.
-- **Copies wallets that actually make you money.** It discovers wallets that
-  were early on launches that ran, then re-scores them on the realised P&L of
-  *your* copies — not on a public leaderboard.
-- **Decides in microseconds** with a deterministic, itemised, fully testable
-  scorer. Every decision can be reproduced from its stored feature vector.
-- **Uses a local LLM off the hot path** for qualitative red flags and a nightly
-  review of your trade history that proposes bounded parameter changes.
-- **Manages exits mechanically** — stop loss, trailing stop, a take-profit
-  ladder, stagnation and rug detection — in a loop nothing else can block.
-- **Learns.** Every trade's entry features and outcome go into a local database
-  that shifts future scoring toward what has actually paid you.
-- **Shows you everything** on a live dashboard with a kill switch that works
-  from your phone.
+**Collapses sybil wallets before counting consensus.** A naive bot sees "5
+smart wallets bought this" and scores it as five independent confirmations. In
+reality those five were funded from the same address eleven minutes ago —
+they are *one actor*, possibly one who knows what your bot looks for and is
+manufacturing exactly that signal. MCTB clusters wallets by funding lineage,
+temporal batching, co-buying and behavioural fingerprint, then **counts each
+entity once**.
 
----
+**Tests whether you can actually sell, before buying.** Every candidate gets a
+live Jupiter sell quote. If no sell route exists, the trade is refused — and
+that catches honeypots which pass every contract scan, because the contract
+is fine and the *market* is the trap.
 
-## Table of contents
+**Prices the round trip before committing.** Fees plus price impact in both
+directions. On a thin token this routinely exceeds 20%, meaning the position
+needs a 20% move just to break even. Worth knowing before, not after.
 
-1. [Try it in five minutes](#1-try-it-in-five-minutes)
-2. [How it works](#2-how-it-works)
-3. [What you need](#3-what-you-need)
-4. [Full install — all three devices](#4-full-install--all-three-devices)
-   - [4.1 Host PC](#41-host-pc-console--redis)
-   - [4.2 RPi 1 — Scout](#42-rpi-1--scout)
-   - [4.3 RPi 2 — Brain](#43-rpi-2--brain)
-   - [4.4 The local LLM](#44-the-local-llm)
-5. [Configuration](#5-configuration)
-6. [Running it](#6-running-it)
-7. [Paper trading](#7-paper-trading-do-this-for-weeks)
-8. [Going live](#8-going-live)
-9. [Daily operation](#9-daily-operation)
-10. [Command reference](#10-command-reference)
-11. [Repository layout](#11-repository-layout)
+**Detects manufactured volume.** Huge volume against thin liquidity with few
+unique wallets is the same coins cycling between the same hands. Computed from
+free data that most bots never bother to cross-reference.
+
+**Grades attention by shape, not level.** Social volume is trivially bought.
+MCTB scores posting-interval regularity, near-duplicate text, account age and
+follower uniformity — so a high mention count with a high astroturf score
+scores **worse** than no mentions at all.
+
+**Cross-checks every provider against every other.** Blockers are OR'd (one
+credible "unsafe" beats three "fine"), quality is medianed, disagreement is
+recorded and drops confidence. Every answer carries provenance.
+
+**Learns what pays *you*.** Every trade's entry features and outcome feed a
+local expectancy table, shrunk by sample size and hard-capped so a lucky
+streak cannot rewrite your strategy.
 
 ---
 
-## 1. Try it in five minutes
+## Contents
 
-You do not need any Raspberry Pi hardware to start. Everything runs on one
-machine, and this is genuinely where you should spend your first few weeks.
+1. [Five minutes](#1-five-minutes)
+2. [Architecture](#2-architecture)
+3. [Hardware](#3-hardware)
+4. [Install — all three devices](#4-install--all-three-devices)
+5. [Data providers](#5-data-providers)
+6. [The terminal](#6-the-terminal)
+7. [Alerts and automation](#7-alerts-and-automation)
+8. [Speed](#8-speed)
+9. [Paper trading](#9-paper-trading)
+10. [Going live](#10-going-live)
+11. [Command reference](#11-command-reference)
+12. [Layout](#12-layout)
+
+---
+
+## 1. Five minutes
+
+No Raspberry Pi needed. Everything runs on one machine, and this is where you
+should spend your first weeks.
 
 ```bash
 git clone https://github.com/z440-prod/meme-coin-trade-bot.git
 cd meme-coin-trade-bot
 
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[console,dev]"
+pip install -e ".[all,dev]"
 
 cp config/config.example.yaml config/config.yaml
 cp .env.example .env
 ```
 
-Run the offline simulator — no network, no Redis, no API keys:
+Look up a real token right now — **no API keys, no Redis, no setup**:
 
 ```bash
-mctb simulate --tokens 200
+mctb token 8LXPAS3MR5oSeEC1LqGZyHVpgs1Qw6m9My6iDKTPpump
 ```
 
-You get a funnel showing where candidates were rejected, which gates dominate,
-and what the strategy would have done. Change a value in
-`config/config.yaml`, run it again, see the difference.
+```
+SPIDERMAN  8LXPAS3MR5oSeEC1LqGZyHVpgs1Qw6m9My6iDKTPpump
+assembled in 793ms at cold tier
 
-Then run the real thing against the live pump.fun feed, in paper mode:
+No blockers found
+ Liquidity                                $0
+ Volume 24h                          $51,782
+ Risk score                            1/100
+ Confidence                             high
+ Sources           goplus, rugcheck, jupiter
+ Mint authority                      revoked
+ Freeze authority                    revoked
+ Sellable                                yes
+ Top 10 hold                           38.1%
+```
+
+Three independent providers agreed, in under a second, for free.
+
+See what you have:
 
 ```bash
-# one-time: Redis for the message bus
+mctb providers            # 6 ready with zero keys, all critical gaps covered
+mctb simulate --tokens 200  # offline strategy test, no network
+```
+
+Then run the whole system in paper mode:
+
+```bash
 sudo apt install redis-server     # macOS: brew install redis
-
-mctb preflight     # checks everything before you start
-mctb all           # runs scout + brain + console in one process
+mctb preflight
+mctb all
 ```
 
-Open **http://localhost:8787**.
-
-You are now watching real launches, screening them on chain, and paper-trading
-them with simulated fills priced against real bonding curves. No money is at
-risk — `execution.mode` is `paper` and `live_trading_enabled` is `false`.
+Dashboard at **http://localhost:8787** · terminal at **/terminal**.
 
 ---
 
-## 2. How it works
+## 2. Architecture
 
 ```
-┌──────────────────┐        ┌──────────────────┐
-│  SCOUT  (RPi 1)  │        │  BRAIN  (RPi 2)  │
-│                  │        │                  │
-│ PumpPortal feed  │        │ hard gates       │
-│ Solana RPC watch │        │ scorer (µs)      │
-│ social polling   │        │ personal edge    │
-│ wallet tracking  │        │ LLM (advisory)   │
-│ on-chain screen  │        │ risk + sizing    │
-│                  │        │ exit machine     │
-│ emits Candidates │        │ signs + executes │
-│ holds no keys    │        │ HOLDS THE KEY    │
-└────────┬─────────┘        └─────────┬────────┘
-         │                            │
-         └──────────┬─────────────────┘
-                    │
-            ┌───────▼────────┐
-            │  REDIS  (bus)  │
-            └───────┬────────┘
-                    │
-         ┌──────────▼───────────┐
-         │  CONSOLE  (Host PC)  │
-         │  dashboard · alerts  │
-         │  watchdog · killswitch│
-         └──────────────────────┘
+┌──────────────────┐        ┌──────────────────────────────┐
+│  SCOUT  (RPi 1)  │        │       BRAIN  (RPi 2)         │
+│                  │        │                              │
+│ PumpPortal feed  │        │  gates → score → intel →     │
+│ RPC log watcher  │        │  risk → size → route → exec  │
+│ social polling   │        │                              │
+│ wallet tracking  │        │  entity graph · fusion       │
+│ on-chain screen  │        │  personal edge · LLM         │
+│                  │        │  exit state machine          │
+│ emits Candidates │        │  HOLDS THE ONLY KEY          │
+└────────┬─────────┘        └──────────┬───────────────────┘
+         │                             │
+         └───────────┬─────────────────┘
+                     │  Redis
+         ┌───────────▼────────────────┐
+         │     CONSOLE  (Host PC)     │
+         │  terminal · dashboard      │
+         │  watchdog · killswitch     │
+         │  inbound webhooks          │
+         └────────────────────────────┘
 ```
 
-Three processes so that any one can crash or be redeployed without taking the
-others down. The Brain is the only machine that ever holds a private key; the
-Scout parses untrusted JSON from the internet all day and can trade nothing.
+**Why the decision path is arithmetic, not AI.** A quantized 3B model on a Pi
+needs 15–40 seconds for a useful answer; the entry window is a few seconds. So
+the scorer decides — microseconds, deterministic, unit-tested — and the LLM
+advises off the hot path with a bounded effect. It earns its keep on the
+nightly trade review, where nothing waits on it.
 
-**The decision path is arithmetic, not AI.** A quantized 3B model on a Pi
-generates 5–15 tokens/sec, so a 200-token answer takes 15–40 seconds — far
-longer than the window in which a launch is still worth entering. So the
-scorer decides (microseconds, deterministic, unit-tested) and the LLM advises
-off the hot path, bounded in how far it can move a score. Where it genuinely
-earns its keep is the nightly review, where nothing is waiting on it.
+**Why 20 providers don't make it slow.** Tiered enrichment. The entry path
+runs at `HOT` tier, which performs **zero network I/O** — it reads what
+background workers already cached. Anything missing is queued, so the *next*
+decision is better informed and an open position can still be exited on it.
 
-Full detail in [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Full detail: [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
-## 3. What you need
-
-### Minimum (paper trading — start here)
-
-- Any computer with Python 3.10+
-- Redis
-- A Solana RPC endpoint (the free public one works for paper trading)
-
-### Full deployment
+## 3. Hardware
 
 | | Recommended | Why |
 |---|---|---|
-| **RPi 1** (Scout) | Pi 5, 8GB, NVMe SSD, Ethernet | Feed ingestion, screening |
-| **RPi 2** (Brain) | Pi 5, 8GB, NVMe SSD, Ethernet | Execution + LLM; the RAM is for the model |
-| **Host PC** | Anything with a browser | Dashboard + Redis. A GPU here is a big upgrade for the LLM |
-| **RPC endpoint** | Helius / QuickNode / Triton free tier | **The public endpoint will rate-limit you into missing fills** |
+| **RPi 1** (Scout) | Pi 5 8GB, NVMe SSD, **Ethernet** | Feed ingestion, screening |
+| **RPi 2** (Brain) | Pi 5 8GB, NVMe SSD, **Ethernet** | Execution + LLM |
+| **Host PC** | Anything with a browser | Terminal + Redis. A GPU is a big LLM upgrade |
+| **RPC** | Helius free tier | The public endpoint **will** cost you fills |
 
-Two things people get wrong and regret:
+Two mistakes people regret: **Wi-Fi** (adds 10–50ms jitter — you are already
+losing the latency race) and **cheap microSD** (constant SQLite writes kill
+them, silently, usually within months).
 
-- **Use Ethernet, not Wi-Fi.** Wi-Fi adds 10–50ms of jitter. You are already
-  losing the latency race; don't hand over another 30ms to avoid a cable.
-- **Use an SSD, not a cheap microSD.** Constant SQLite and log writes kill
-  consumer SD cards, often within months, and they corrupt silently. This is
-  the most common cause of a Pi trading bot mysteriously dying.
-
-Buying guide and full wiring instructions: [HARDWARE.md](docs/HARDWARE.md).
+Full buying and wiring guide: [HARDWARE.md](docs/HARDWARE.md).
 
 ---
 
-## 4. Full install — all three devices
+## 4. Install — all three devices
 
-Do the host PC first — the Pis need its IP address.
+Host PC first; the Pis need its IP.
 
-### 4.1 Host PC (Console + Redis)
+### 4.1 Host PC
 
 ```bash
 git clone https://github.com/z440-prod/meme-coin-trade-bot.git
@@ -200,72 +216,43 @@ cd meme-coin-trade-bot
 ./scripts/install_host.sh
 ```
 
-This installs Python dependencies, installs and configures Redis for LAN
-access, creates `config/config.yaml` and `.env`, and prints this machine's
-LAN IP. **Write that IP down** — both Pis need it.
+Installs dependencies and Redis, configures it for LAN access, and prints this
+machine's IP. **Write it down.**
 
-Secure Redis before you go anywhere near live trading. By default it is now
-reachable from your LAN with no password, which means anyone on your network
-can read your positions and command the Brain to sell:
+Secure Redis before going live — by default it is now reachable from your LAN
+with no password, which means anyone on your network can command the Brain:
 
 ```bash
-sudo nano /etc/redis/redis.conf
-#   requirepass <a-long-random-string>
+sudo nano /etc/redis/redis.conf     # requirepass <long-random-string>
 sudo systemctl restart redis-server
 ```
 
-Put the same value in `MCTB_REDIS_PASSWORD` in `.env` on all three devices.
-
-Then:
+Put the same value in `MCTB_REDIS_PASSWORD` on all three devices.
 
 ```bash
 source .venv/bin/activate
-nano .env            # set MCTB_REDIS_URL to this machine's IP
+nano .env          # MCTB_REDIS_URL → this machine's IP
 mctb preflight
 mctb console
 ```
 
-Open **http://localhost:8787**. It will show both services as "never seen"
-until the Pis are up.
-
----
-
 ### 4.2 RPi 1 — Scout
 
-Flash **Raspberry Pi OS 64-bit** (Lite is fine), enable SSH, set the hostname
-to `mctb-scout`, then:
+Flash **Raspberry Pi OS 64-bit** (Lite), hostname `mctb-scout`, SSH on.
 
 ```bash
 ssh pi@mctb-scout.local
 sudo apt update && sudo apt full-upgrade -y && sudo reboot
 ```
 
-After it comes back:
-
 ```bash
 git clone https://github.com/z440-prod/meme-coin-trade-bot.git
 cd meme-coin-trade-bot
 ./scripts/install_pi.sh scout
+nano .env      # Redis URL + RPC URL
 ```
 
-The installer handles system packages, NTP (a Pi has no battery-backed clock,
-and drift breaks transaction building in ways that look like bad luck), the
-virtual environment, and a systemd unit.
-
-Configure it:
-
-```bash
-nano .env
-```
-
-```bash
-MCTB_REDIS_URL=redis://192.168.1.50:6379/0     # your host PC's IP
-MCTB_REDIS_PASSWORD=<the password you set>
-MCTB_RPC_URL=https://your-endpoint.example.com/?api-key=...
-MCTB_RPC_WS_URL=wss://your-endpoint.example.com/?api-key=...
-```
-
-Copy `config/config.yaml` from the host PC so all three devices agree, then:
+Copy `config/config.yaml` from the host so all three agree, then:
 
 ```bash
 source .venv/bin/activate
@@ -274,67 +261,34 @@ sudo systemctl enable --now mctb-scout
 journalctl -u mctb-scout -f
 ```
 
-Within a minute you should see new tokens arriving. The dashboard's Scout
-indicator turns green.
-
----
-
 ### 4.3 RPi 2 — Brain
 
-Same flash process, hostname `mctb-brain`.
+Same, hostname `mctb-brain`:
 
 ```bash
-ssh pi@mctb-brain.local
-git clone https://github.com/z440-prod/meme-coin-trade-bot.git
-cd meme-coin-trade-bot
-./scripts/install_pi.sh brain
-```
-
-Note this installs the `[trade]` extras — `solders` for transaction signing and
-`cryptography` for the keystore.
-
-```bash
-nano .env      # same Redis + RPC values as the Scout
-```
-
-Copy `config/config.yaml` across, then:
-
-```bash
+./scripts/install_pi.sh brain      # installs signing + keystore extras
+nano .env                          # same Redis + RPC values
 source .venv/bin/activate
 mctb preflight
 sudo systemctl enable --now mctb-brain
-journalctl -u mctb-brain -f
 ```
 
 You should see `brain ready — mode: paper`.
 
-**Do not create a wallet keystore yet.** Paper trading needs no wallet at all.
-Come back to that in [section 8](#8-going-live), after weeks of paper results.
+**Do not create a wallet yet.** Paper trading needs none. That is
+[section 10](#10-going-live), after weeks of results.
 
----
-
-### 4.4 The local LLM
-
-Optional. The bot trades fine without it and degrades gracefully if it is
-unreachable.
-
-On the Brain:
+### 4.4 Local LLM (optional)
 
 ```bash
-./scripts/setup_llm.sh install          # builds llama.cpp — 10-25 min on a Pi 5
+./scripts/setup_llm.sh install          # builds llama.cpp, 10-25 min
 ./scripts/setup_llm.sh model llama3.2-3b
 ./scripts/setup_llm.sh bench            # measure YOUR hardware
-./scripts/setup_llm.sh service          # install + start as systemd
+./scripts/setup_llm.sh service
 ```
 
-`bench` matters. It tells you tokens/sec on your actual hardware, which is what
-`llm.timeout_s` should be set against. On a Pi 5 expect 5–15 tok/s — enough for
-the nightly review, marginal for live candidates.
-
-**If your host PC has a GPU, run the model there instead.** You go from ~10
-tok/s to hundreds, which is the difference between the LLM being useful only
-overnight and being useful on live candidates too. Run the server on the PC
-and set this on the Brain:
+If the host PC has a GPU, run the model there instead and point the Brain at
+it — you go from ~10 tok/s to hundreds:
 
 ```bash
 MCTB_LLM_BASE_URL=http://192.168.1.50:8080
@@ -342,176 +296,199 @@ MCTB_LLM_BASE_URL=http://192.168.1.50:8080
 
 ---
 
-## 5. Configuration
+## 5. Data providers
 
-Two files, with a deliberate split:
+**Every key is optional.** With none, six free keyless providers cover market
+data, security screening and execution:
 
-| File | Contains | Committed? |
+```
+DEX Screener · GoPlus · Rugcheck · Jupiter · Raydium · Meteora
+```
+
+```bash
+mctb providers --probe
+```
+
+```
+6 ready · 11 awaiting keys · 5 link-only
+All critical capabilities are covered.
+```
+
+### The one key worth getting first
+
+**Helius** (free tier, `helius.dev`) does three jobs at once:
+
+1. A fast RPC endpoint — the public one is rate-limited to the point of
+   breaking your fills
+2. Parsed transactions
+3. **Wallet funding lineage**, which powers entity resolution — the feature
+   that stops five sybil wallets counting as five signals
+
+```bash
+MCTB_HELIUS_API_KEY=your-key
+MCTB_RPC_URL=https://mainnet.helius-rpc.com/?api-key=your-key
+```
+
+### Everything else
+
+| Have no public API | Paid, useful later | Expensive, only at size |
 |---|---|---|
-| `config/config.yaml` | Strategy, risk, exits — identical on all three devices | Gitignored, but safe to share |
-| `.env` | Secrets and per-machine endpoints | **Never share** |
+| Photon, BullX, Bubblemaps (deep links) | Birdeye, Cielo, Solscan | Nansen, Arkham, LunarCrush, Kaito, DEXTools |
 
-`config.yaml` is merged *on top of* a strategy preset, so your edits always
-beat the preset:
+GMGN's endpoints are undocumented and behind bot protection — opt-in via
+`providers.gmgn_opt_in`, off by default.
 
-```yaml
-strategy_preset: balanced    # conservative | balanced | degen
-```
+**Full honest breakdown of all 28, with what each is worth:**
+[PROVIDERS.md](docs/PROVIDERS.md).
 
-| Preset | Entry threshold | Requires a tracked wallet | Max position | Expect |
-|---|---|---|---|---|
-| `conservative` | 72 | **yes** | 0.02 SOL | a few trades a day |
-| `balanced` | 62 | no | 0.05 SOL | steady flow |
-| `degen` | 52 | no | **0.015 SOL** | constant, mostly losers |
-
-**Start with `conservative`.** It takes far fewer trades and most of what it
-skips would have lost money. Note that `degen` sizes *smaller*, not larger —
-more aggression means more shots, each one smaller, which is the only way a
-low-hit-rate strategy survives its own losing streaks.
-
-The single highest-value change available to you:
-
-```yaml
-gates:
-  require_smart_wallet: true    # only buy what a proven wallet already bought
-```
-
-Every parameter explained: [STRATEGY.md](docs/STRATEGY.md).
-
-### Seeding wallets to copy
-
-Auto-discovery builds a wallet list over a few days of running. To start
-faster, add wallets you already trust (find them on gmgn.ai, dexscreener or
-Solscan):
-
-```yaml
-wallets:
-  seed_wallets:
-    - "AArPXm8JatJiuyEffuC1un2Sc835SULa4uQqDcaGpAjV"
-```
-
-Seeded wallets start trusted but not blindly — once you have copied one a few
-times, its score is driven by the realised P&L of *your* copies. A wallet
-whose calls keep losing you money loses influence no matter how good its
-public record looks.
+> Do not pay for anything until the free stack is profitable. If it isn't, a
+> paid feed will not fix it — you would be buying more of an input that is
+> already not working.
 
 ---
 
-## 6. Running it
+## 6. The terminal
 
-### As services (production)
+**http://localhost:8787/terminal** — keyboard-driven, six live panels.
 
-```bash
-sudo systemctl enable --now mctb-scout    # RPi 1
-sudo systemctl enable --now mctb-brain    # RPi 2
-sudo systemctl enable --now mctb-llm      # RPi 2, optional
-
-journalctl -u mctb-brain -f
+```
+positions │ dossier         │ providers
+──────────┼─────────────────┼──────────
+feed      │ entity clusters │ perf + latency
 ```
 
-On the host PC, run `mctb console` — or add it to your startup items.
+### Commands
 
-### In the foreground (development)
+| | |
+|---|---|
+| `<mint>` | Load a full dossier |
+| `s <query>` | Search tokens |
+| `w <wallet>` | Wallet dossier + cluster |
+| `new` / `hot` | New launches / paid promotions |
+| `deep` | Re-run current dossier at MANUAL tier |
+| `probe` | Live-check every provider |
+| `kill` / `resume` / `closeall` | Control |
 
-```bash
-mctb scout      # RPi 1
-mctb brain      # RPi 2
-mctb console    # host PC
-mctb all        # everything in one process
-```
+### Keys
 
-### The dashboard
+`/` focus · `j`/`k` navigate · `d` dossier · `x` exit position ·
+`1`-`3` switch feed · `?` help
 
-**http://localhost:8787**, or `http://<host-pc-ip>:8787` from your phone on
-the same network.
+The dossier panel shows blockers in red, cluster warnings in blue, a risk bar,
+wash-trade suspicion, authority status, sellability, and one-click links to all
+12 external tools — including the ones with no API.
 
-It shows open positions with live P&L and per-position exit buttons,
-performance metrics, the decision and fill feeds, tracked wallet reputations,
-the learned edge table, LLM notes, and service health. The **KILL** and
-**Close all** buttons work from anywhere on your LAN.
-
-Do not port-forward it to the internet — it has no authentication because it
-is designed for a trusted LAN. Use Tailscale or an SSH tunnel for remote
-access.
+The **entity clusters** panel is the one to watch. When it shows
+`C4a2f8b1 · 5 wallets · funded by 8xK2m..v within 12 min of each other`, that
+is five apparent signals that are actually one actor.
 
 ---
 
-## 7. Paper trading (do this for weeks)
+## 7. Alerts and automation
+
+**Out:** Telegram, Discord, and any JSON webhook (Zapier, n8n, Make).
+
+```bash
+MCTB_TELEGRAM_BOT_TOKEN=...    # @BotFather
+MCTB_TELEGRAM_CHAT_ID=...      # @userinfobot
+MCTB_DISCORD_WEBHOOK_URL=...
+```
+
+**In:** TradingView, Zapier, n8n can drive MCTB.
+
+```bash
+openssl rand -hex 32           # → MCTB_WEBHOOK_SECRET
+```
+
+```yaml
+webhooks:
+  enabled: true
+  allow_trading: false   # leave false unless you are certain
+```
+
+Security is three-layered: secret in the path (constant-time compared),
+HMAC-SHA256 with replay protection, and a capability allowlist. Trading
+actions need a signature **and** `allow_trading`; the config refuses to start
+if you enable trading without a secret. Even then, an inbound `buy` routes
+through normal scoring — external systems can say *what to look at*, not
+*what to buy*.
+
+```bash
+mctb webhook-test http://192.168.1.50:8787 --action signal --mint <mint>
+```
+
+Full guide incl. TradingView/n8n/Zapier recipes: [AUTOMATION.md](docs/AUTOMATION.md).
+
+---
+
+## 8. Speed
+
+Twenty data sources, and none of them on the critical path.
+
+| Technique | Effect |
+|---|---|
+| **Tiered enrichment** | Entry decisions read cache only — zero network I/O |
+| **Stale-while-revalidate** | Serve instantly, refresh behind the caller |
+| **Single-flight coalescing** | Concurrent identical requests become one |
+| **HTTP/2 + warm pools** | Saves a 100–300ms TLS handshake per call |
+| **Per-provider token buckets** | Never discover a rate limit the hard way |
+| **Circuit breakers** | A dead provider costs microseconds, not seconds |
+| **Batch endpoints** | 30 tokens priced in one request |
+| **uvloop** | 2–4x faster event loop |
+| **GC tuning** | Fewer latency spikes under high allocation |
+
+```bash
+pip install uvloop     # then it is automatic
+```
+
+The terminal's latency panel shows p50/p99/max per path. Watch **p99**, not
+the average — a path averaging 3ms with a 900ms p99 still misses the trades
+that matter, because slow cases correlate with busy moments.
+
+---
+
+## 9. Paper trading
 
 Paper mode prices against real bonding curves and models latency, slippage,
-pump.fun's fee, and your own order's price impact. It is not free money, but
-it is free tuition.
-
-Watch your results:
+fees and your own price impact.
 
 ```bash
-mctb stats            # performance metrics + recent trades
-mctb stats --edge     # what the bot has learned from YOUR trades
+mctb stats            # performance
+mctb stats --edge     # what it has learned from YOUR trades
 ```
 
-The metrics that matter, in order:
-
-| Metric | Read it as |
+| Metric | Read as |
 |---|---|
-| **Profit factor** | Gross wins ÷ gross losses. Below 1.0 you are losing money. |
-| **Max drawdown** | Worst peak-to-trough. Would you really have kept going? |
-| **Expectancy** | Average P&L per trade — the only thing that compounds |
-| Win rate | **Least** informative. A 25% win rate can be excellent here. |
-| Exit reasons | Where your rules actually fire. Often surprising. |
+| **Profit factor** | Gross wins ÷ gross losses. Below 1.0 you are losing. |
+| **Max drawdown** | Would you really have kept going? |
+| Win rate | **Least** informative. 25% can be excellent here. |
+| Exit reasons | Where rules actually fire. Often surprising. |
 
-If exits are dominated by `stagnant` or `max_hold`, your entries are early. If
-dominated by `stop_loss`, they are late.
-
-Tuning discipline, which is harder than it sounds:
-
-- **One change at a time.** Two and you learn nothing.
-- **50+ trades per change.** Below that you are reading noise.
-- **Check the funnel before touching weights** — `mctb simulate --tokens 200`
-  shows which gate is rejecting everything. If 90% die at one gate, that gate
-  *is* your strategy.
+Discipline: one change at a time, 50+ trades per change, and check the funnel
+(`mctb simulate --tokens 200`) before touching weights — if 90% die at one
+gate, that gate *is* your strategy.
 
 ---
 
-## 8. Going live
+## 10. Going live
 
-**Only after all of these are true:**
+**Only when all of these are true:**
 
 - [ ] 100+ closed paper trades
-- [ ] Profit factor above 1.0 across them
-- [ ] You have read `mctb stats --edge` and it makes sense to you
-- [ ] You have sat through a losing streak on paper without wanting to rewrite
-      everything — that reaction is what actually loses money
+- [ ] Profit factor above 1.0
+- [ ] `mctb stats --edge` makes sense to you
+- [ ] You sat through a losing streak without wanting to rewrite everything
 - [ ] You have read [SAFETY.md](docs/SAFETY.md) in full
 
-### Create a dedicated wallet
-
-In Phantom or Solflare, create a **brand new wallet**. Never reuse one holding
-anything else. The key sits decrypted in memory on an internet-connected
-device in your house; make the worst case "I lost the trading float".
-
-Export its private key (Settings → Manage Accounts → Show Private Key — the
-long base58 string, *not* the seed phrase).
-
-On the Brain, and only the Brain:
-
 ```bash
-source .venv/bin/activate
-mctb keystore create
-```
-
-Nothing is echoed to the terminal and the key is never written unencrypted.
-It prints the public address — fund that with an amount whose total loss would
-be annoying but not harmful. **Well under 1 SOL to start.**
-
-```bash
+# On the Brain, and only the Brain:
+mctb keystore create      # dedicated NEW wallet, key never stored plaintext
 chmod 600 .env secrets/trading.keystore
 chmod 700 secrets/
-mctb keystore show     # confirm the address and balance
+mctb keystore show        # fund this address, well under 1 SOL to start
 ```
 
-### Arm it
-
-Both latches, deliberately, so no single careless edit can arm your wallet:
+Two latches, deliberately:
 
 ```yaml
 execution:
@@ -519,137 +496,82 @@ execution:
   live_trading_enabled: true
 ```
 
-Start absurdly small. The first live week is not for profit — it is for
-discovering everything that behaves differently with real money while each
-lesson costs a fraction of a cent:
+Start absurdly small — the first week is for discovering what behaves
+differently with real money, while each lesson costs a fraction of a cent:
 
 ```yaml
 risk:
   max_position_sol: 0.005
   max_concurrent_positions: 1
-  max_positions_per_hour: 3
   daily_loss_limit_sol: 0.02
 ```
 
-```bash
-mctb preflight                    # will warn loudly that live is armed
-sudo systemctl restart mctb-brain
-journalctl -u mctb-brain -f
-```
-
-Watch the first several trades in real time. Scale up only once live results
-match paper results — if they diverge sharply, the difference is real and paper
-was flattering you.
-
-### Stopping, urgently
+**Stopping:**
 
 ```bash
-mctb kill          # stop all new entries
+mctb kill          # stop new entries
 touch KILL_SWITCH  # works even if Redis is down
-mctb close-all     # sell everything at market, now
+mctb close-all     # sell everything now
 ```
 
-Or the red buttons on the dashboard, from your phone. Exits keep running
-regardless — abandoning open positions is not a safe state.
-
+Exits keep running regardless — abandoning open positions is not a safe state.
 If the bot is unresponsive entirely, import the key into Phantom and sell
 manually. **The bot is not required to access your funds.**
 
 ---
 
-## 9. Daily operation
-
-```bash
-mctb stats                    # how are we doing
-mctb stats --edge             # what has it learned
-mctb review                   # run the LLM trade review now
-make backup                   # snapshot the database
-```
-
-**Back up the database.** `data/mctb.db` holds every trade, the learned feature
-table, wallet reputations and creator blocklists. A fresh install with an empty
-database is a bot with amnesia that will repeat mistakes you already paid for.
-
-The nightly review (default 04:00 UTC) has the local LLM read your performance,
-learned edge and recent trades, then report what preceded losses and propose
-specific parameter changes. Proposals are validated against an allowlist with
-hard bounds, so a confidently wrong suggestion cannot set your position size to
-10 SOL. `auto_apply_tuning` defaults to false and should stay there — the value
-is in the analysis, not in letting a 3B model edit your risk limits.
-
-Things going wrong: [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
-
----
-
-## 10. Command reference
+## 11. Command reference
 
 ```
 mctb scout | brain | console | all     run a service
-mctb simulate --tokens 200             offline synthetic-market test
-mctb preflight                         check every dependency and endpoint
-mctb stats [--edge]                    performance and learned edge
-mctb review                            run the LLM trade review now
-mctb kill / resume                     engage or clear the kill switch
-mctb close-all                         sell every open position at market
-mctb keystore create | show            manage the encrypted wallet
-mctb config-show                       resolved config, secrets masked
+mctb token <mint> [--deep]             intelligence dossier
+mctb providers [--probe]               data source status
+mctb simulate --tokens 200             offline strategy test
+mctb preflight                         check everything
+mctb stats [--edge]                    performance and learning
+mctb review                            LLM trade review now
+mctb webhook-test <url>                verify automation wiring
+mctb kill | resume | close-all         control
+mctb keystore create | show            wallet
 ```
 
 ```
-make install-dev   install with all extras
-make test          run the test suite (192 tests)
-make lint          ruff
-make sim           run the simulator
-make backup        snapshot the database
+make install-dev   make test   make lint   make sim   make backup
 ```
 
 ---
 
-## 11. Repository layout
+## 12. Layout
 
 ```
 src/mctb/
-├── config.py            all tunables, validated at startup
-├── models.py            event contract shared by all three devices
-├── bus.py               Redis pub/sub + durable journal
-├── db.py                SQLite — trades, learned edge, reputations
-├── keystore.py          scrypt-encrypted wallet storage
-├── preflight.py         pre-flight checks
-├── simulator.py         offline synthetic market
-├── cli.py               the `mctb` command
-│
-├── solana/
-│   ├── curve.py         bonding curve decode + pricing + quoting
-│   ├── rpc.py           async RPC with failover
-│   └── checks.py        mint/freeze authority, concentration, bundles
-│
-├── scout/               RPi 1
-│   ├── pumpportal.py    multiplexed WebSocket feed
-│   ├── rpc_watcher.py   independent RPC path + price oracle
-│   ├── social.py        X polling (optional)
-│   ├── wallets.py       smart-wallet discovery and reputation
-│   ├── observer.py      rolling per-token statistics
-│   └── main.py
-│
-├── brain/               RPi 2
-│   ├── gates.py         hard filters + portfolio risk limits
-│   ├── scoring.py       deterministic scorer + position sizing
-│   ├── edge.py          the personal learning layer
-│   ├── llm.py           local LLM advisor (off the hot path)
-│   ├── executor.py      paper + live signing
-│   ├── exits.py         exit state machine (pure, fully tested)
-│   ├── portfolio.py     position lifecycle and accounting
-│   └── main.py
-│
-└── console/             Host PC
-    ├── supervisor.py    backstop stop-loss + heartbeat watchdog
-    ├── notify.py        desktop/Telegram alerts, browser opening
-    ├── static/          the dashboard (no build step)
-    └── main.py
+├── providers/        23 adapters behind one interface
+│   ├── base.py         contract: capabilities, tiers, health
+│   ├── http.py         rate limit · circuit break · cache · coalesce
+│   ├── registry.py     capability routing and fan-out
+│   ├── dexscreener.py  security.py  execution.py  market.py
+│   ├── onchain.py      smartmoney.py  social.py  links.py
+├── intel/            fusion and entity resolution
+│   ├── fusion.py       cross-provider consensus + provenance
+│   ├── graph.py        wallet clustering — the sybil collapse
+│   ├── narrative.py    astroturf detection
+│   └── dossier.py      tiered enrichment engine
+├── brain/            RPi 2
+│   ├── scoring.py      deterministic scorer
+│   ├── intel_gate.py   applying fused intel, bounded
+│   ├── router.py       venue selection + cost estimation
+│   ├── edge.py         personal learning layer
+│   ├── exits.py        exit state machine (pure, fully tested)
+│   └── executor.py     paper + live signing
+├── scout/            RPi 1 — feeds, screening, wallet tracking
+├── console/          host PC — terminal, dashboard, webhooks
+├── automation/       inbound + outbound
+├── solana/           curve maths, RPC, contract checks
+└── runtime.py        uvloop, GC, latency tracking
 
-docs/     ARCHITECTURE · HARDWARE · STRATEGY · SAFETY · TROUBLESHOOTING · REALITY_CHECK
-scripts/  install_pi.sh · install_host.sh · setup_llm.sh
-tests/    192 tests — curve maths, exits, gates, scoring, learning, lifecycle
+docs/   PROVIDERS · AUTOMATION · ARCHITECTURE · HARDWARE
+        STRATEGY · SAFETY · TROUBLESHOOTING · REALITY_CHECK
+tests/  280 tests
 ```
 
 ---
@@ -658,6 +580,6 @@ tests/    192 tests — curve maths, exits, gates, scoring, learning, lifecycle
 
 MIT. See [LICENSE](LICENSE).
 
-Provided as-is, with no warranty. Trading cryptocurrency carries a substantial
-risk of total loss. You are responsible for your own funds, your own
-configuration, and your own compliance with the law where you live.
+Provided as-is, no warranty. Trading cryptocurrency carries substantial risk of
+total loss. You are responsible for your own funds, your own configuration, and
+your own compliance with the law where you live.

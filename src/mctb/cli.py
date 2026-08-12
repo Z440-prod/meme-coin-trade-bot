@@ -47,12 +47,22 @@ def _load(config_path: Path | None, role: str | None = None):
 # --------------------------------------------------------------------------
 
 
+def _boot(cfg) -> None:
+    """Apply runtime tuning before any event loop is created."""
+    from .runtime import apply
+
+    if apply(gc_tuning=cfg.tune_gc, uvloop_enabled=cfg.use_uvloop).get("uvloop"):
+        out.print("[dim]uvloop active[/dim]")
+
+
 @app.command()
 def scout(config: Path | None = ConfigOpt) -> None:
     """Run the Scout (RPi 1) — data collection and screening."""
     from .scout.main import run_scout
 
-    asyncio.run(run_scout(_load(config, "scout")))
+    cfg = _load(config, "scout")
+    _boot(cfg)
+    asyncio.run(run_scout(cfg))
 
 
 @app.command()
@@ -60,15 +70,19 @@ def brain(config: Path | None = ConfigOpt) -> None:
     """Run the Brain (RPi 2) — scoring, execution and position management."""
     from .brain.main import run_brain
 
-    asyncio.run(run_brain(_load(config, "brain")))
+    cfg = _load(config, "brain")
+    _boot(cfg)
+    asyncio.run(run_brain(cfg))
 
 
 @app.command()
 def console(config: Path | None = ConfigOpt) -> None:
-    """Run the Console (host PC) — dashboard and supervision."""
+    """Run the Console (host PC) — dashboard, terminal and supervision."""
     from .console.main import run_console
 
-    asyncio.run(run_console(_load(config, "console")))
+    cfg = _load(config, "console")
+    _boot(cfg)
+    asyncio.run(run_console(cfg))
 
 
 @app.command(name="all")
@@ -426,6 +440,172 @@ def simulate(
 
     cfg = _load(config, "brain")
     asyncio.run(run_simulation(cfg, tokens=tokens, seed=seed))
+
+
+@app.command()
+def providers(config: Path | None = ConfigOpt, probe: bool = False) -> None:
+    """Show every data provider, its status and what it can answer."""
+    from .providers import ProviderRegistry
+
+    cfg = _load(config)
+
+    async def main_() -> None:
+        registry = ProviderRegistry(cfg)
+        registry.build()
+        await registry.start()
+        try:
+            probe_results: dict[str, bool] = {}
+            if probe:
+                out.print("[dim]probing live endpoints…[/dim]")
+                probe_results = await registry.probe_all()
+
+            table = Table(title="Data providers")
+            table.add_column("Provider")
+            table.add_column("Status")
+            table.add_column("Tier")
+            table.add_column("Cost")
+            table.add_column("Capabilities", overflow="fold")
+            if probe:
+                table.add_column("Live")
+
+            for row in registry.describe():
+                colour = {
+                    "ready": "green", "unconfigured": "yellow",
+                    "no_public_api": "dim", "disabled": "dim",
+                }.get(row["status"], "red")
+                cells = [
+                    row["display_name"],
+                    f"[{colour}]{row['status']}[/]",
+                    row["tier"],
+                    "paid" if row["paid"] else "free",
+                    ", ".join(c.replace("token_", "").replace("wallet_", "w:")
+                              for c in row["capabilities"][:5]) or "—",
+                ]
+                if probe:
+                    result = probe_results.get(row["name"])
+                    cells.append(
+                        "[green]ok[/]" if result else ("[red]fail[/]" if result is False else "—")
+                    )
+                table.add_row(*cells)
+            out.print(table)
+
+            coverage = registry.coverage_report()
+            out.print(
+                f"\n[bold]{coverage['ready']}[/bold] ready · "
+                f"{coverage['unconfigured']} awaiting keys · "
+                f"{coverage['link_only']} link-only"
+            )
+            if coverage["critical_gaps"]:
+                out.print(f"[red]Critical gaps:[/red] {', '.join(coverage['critical_gaps'])}")
+            else:
+                out.print("[green]All critical capabilities are covered.[/green]")
+        finally:
+            await registry.close()
+
+    asyncio.run(main_())
+
+
+@app.command()
+def token(mint: str, config: Path | None = ConfigOpt, deep: bool = False) -> None:
+    """Assemble and print an intelligence dossier for one token."""
+    from .intel import IntelEngine
+    from .providers import ProviderRegistry, Tier
+
+    cfg = _load(config)
+
+    async def main_() -> None:
+        registry = ProviderRegistry(cfg)
+        registry.build()
+        await registry.start()
+        engine = IntelEngine(registry)
+        try:
+            dossier = await engine.assemble(
+                mint, tier=Tier.MANUAL if deep else Tier.COLD,
+                timeout_s=20.0 if deep else 8.0,
+            )
+            sec, mk = dossier.security, dossier.market
+
+            out.print(
+                f"\n[bold]{dossier.symbol or mint[:12]}[/bold]  {mint}\n"
+                f"[dim]assembled in {dossier.assembly_ms:.0f}ms at {dossier.tier_used} tier[/dim]\n"
+            )
+
+            if sec.blockers:
+                out.print("[red bold]NOT TRADEABLE[/red bold]")
+                for blocker in sec.blockers:
+                    out.print(f"  [red]•[/red] {blocker}")
+            elif sec.provenance.get("sources"):
+                out.print("[green]No blockers found[/green]")
+            else:
+                out.print("[yellow]No security provider could screen this token[/yellow]")
+
+            table = Table(show_header=False, box=None)
+            table.add_column("k", style="dim")
+            table.add_column("v", justify="right")
+            for label, value in [
+                ("Price", f"${mk.price_usd:.10f}" if mk.price_usd else "—"),
+                ("Liquidity", f"${mk.liquidity_usd:,.0f}"),
+                ("Market cap", f"${mk.market_cap:,.0f}"),
+                ("Volume 24h", f"${mk.volume_24h:,.0f}"),
+                ("Vol / Liq", f"{mk.volume_to_liquidity:.1f}x"),
+                ("Wash suspicion", f"{mk.wash_trade_suspicion:.0%}"),
+                ("Unique 1h", str(mk.unique_wallets_1h)),
+                ("Risk score", f"{sec.risk_score:.0f}/100"),
+                ("Confidence", sec.provenance.get("confidence", "none")),
+                ("Sources", ", ".join(sec.provenance.get("sources", [])) or "none"),
+                ("Mint authority", "LIVE" if sec.mint_authority_live else "revoked"),
+                ("Freeze authority", "LIVE" if sec.freeze_authority_live else "revoked"),
+                ("Sellable", "yes" if sec.sellable else "NO"),
+                ("Top 10 hold", f"{sec.top10_holding_pct:.1%}"),
+            ]:
+                table.add_row(label, value)
+            out.print(table)
+
+            if sec.risk_flags:
+                out.print(f"\n[yellow]Flags:[/yellow] {', '.join(sec.risk_flags[:10])}")
+            for warning in dossier.cluster_warnings:
+                out.print(f"[yellow]⚠[/yellow]  {warning}")
+
+            out.print("\n[dim]" + "  ".join(
+                f"{k}: {v}" for k, v in list(dossier.links.items())[:4]
+            ) + "[/dim]")
+        finally:
+            await registry.close()
+
+    asyncio.run(main_())
+
+
+@app.command()
+def webhook_test(
+    url: str,
+    action: str = "signal",
+    mint: str = "",
+    config: Path | None = ConfigOpt,
+) -> None:
+    """Send a signed test webhook, to verify your automation wiring."""
+    import httpx
+    import orjson
+
+    from .automation import sign_payload
+
+    cfg = _load(config)
+    secret = cfg.webhooks.secret or cfg.webhook_secret
+    if not secret:
+        out.print("[red]No webhook secret configured. Set MCTB_WEBHOOK_SECRET.[/red]")
+        raise typer.Exit(1)
+
+    body = orjson.dumps({"action": action, "mint": mint, "reason": "cli test"})
+    headers = sign_payload(secret, body)
+    headers["Content-Type"] = "application/json"
+
+    try:
+        resp = httpx.post(url.rstrip("/") + f"/webhook/{secret}", content=body,
+                          headers=headers, timeout=15.0)
+        out.print(f"HTTP {resp.status_code}")
+        out.print_json(resp.text)
+    except Exception as exc:  # noqa: BLE001
+        out.print(f"[red]Request failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
 
 
 def main() -> None:

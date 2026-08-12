@@ -271,6 +271,115 @@ class WalletTrackingConfig(BaseModel):
     max_subscribed_wallets: int = 40
 
 
+class ProvidersConfig(BaseModel):
+    """External data providers.
+
+    Every provider is optional. With no keys at all the system still runs on
+    the free keyless set (DEX Screener, GoPlus, Rugcheck, Jupiter, Raydium,
+    Meteora), which covers market data, security screening and execution.
+    """
+
+    # Only run these providers. Empty means "all that are configured".
+    enabled: list[str] = Field(default_factory=list)
+    # Never run these, even if a key exists.
+    disabled: list[str] = Field(default_factory=list)
+
+    # API keys, populated from the environment. Never put keys in YAML.
+    keys: dict[str, str] = Field(default_factory=dict)
+
+    # GMGN uses undocumented endpoints behind bot protection. Off by default.
+    gmgn_opt_in: bool = False
+    # DEXTools puts the plan tier in the URL path: trial | standard | advanced | pro
+    dextools_plan: str = "trial"
+
+    # Latency budgets, in seconds, per enrichment tier.
+    warm_timeout_s: float = 0.4
+    cold_timeout_s: float = 3.0
+    # Background enrichment workers. Three keeps a Pi comfortable.
+    enrich_workers: int = 3
+
+
+class IntelConfig(BaseModel):
+    """Fusion, entity resolution and how intel affects scoring."""
+
+    enabled: bool = True
+
+    # --- Entity resolution -------------------------------------------------
+    # Collapse wallets that are really one actor before counting them as
+    # independent signals. The highest-value setting in this section.
+    entity_resolution: bool = True
+    # Resolve funding lineage via Helius. Needs a Helius key; without it the
+    # graph still works from co-occurrence alone, just less precisely.
+    resolve_funding: bool = True
+    funding_resolve_interval_s: float = 120.0
+    funding_resolve_batch: int = 20
+
+    # Reject a candidate when this share of its apparent smart-wallet
+    # consensus turns out to be a single clustered entity.
+    max_sybil_ratio: float = 0.5
+    # Reject when this share of buyers are wallets created in the last day.
+    max_fresh_wallet_ratio: float = 0.75
+    # Reject when this share of buyers look like deployer insiders.
+    max_insider_ratio: float = 0.25
+
+    # --- Market quality ----------------------------------------------------
+    # Reject when volume looks manufactured. See fusion.py for the heuristic.
+    max_wash_suspicion: float = 0.7
+    # Reject when a round trip would cost more than this percentage.
+    max_round_trip_cost_pct: float = 25.0
+    # Require a live sell route before buying. Catches honeypots that pass
+    # every contract check.
+    require_sellable: bool = True
+
+    # --- Narrative ---------------------------------------------------------
+    # Above this astroturf score, social evidence counts against the token.
+    astroturf_threshold: float = 0.5
+    narrative_ttl_s: float = 1800.0
+
+    # --- Scoring influence -------------------------------------------------
+    # How many points fused intel may add or remove. Bounded like every other
+    # adjustment in the system.
+    max_intel_bonus: float = 12.0
+    max_intel_penalty: float = 35.0
+
+
+class WebhookConfigModel(BaseModel):
+    """Inbound webhook control (TradingView, Zapier, n8n)."""
+
+    enabled: bool = False
+    # Shared secret for HMAC signing. Set via MCTB_WEBHOOK_SECRET.
+    secret: str = ""
+    # Whether an inbound message may open or close positions. Off by default:
+    # anything that can move money should be an explicit decision.
+    allow_trading: bool = False
+    # Whether it may engage the kill switch. Safe to leave on — it only stops.
+    allow_kill: bool = True
+    max_age_s: float = 300.0
+    allowed_ips: list[str] = Field(default_factory=list)
+
+
+class AlertsConfig(BaseModel):
+    """Outbound alerting."""
+
+    enabled: bool = True
+    telegram: bool = False
+    discord: bool = False
+    # Generic JSON POST targets — Zapier catch hooks, n8n webhook nodes, etc.
+    webhooks: list[str] = Field(default_factory=list)
+
+    # What gets an alert.
+    on_entry: bool = True
+    on_exit: bool = True
+    on_big_win: bool = True
+    on_big_loss: bool = True
+    on_halt: bool = True
+    on_provider_failure: bool = True
+    big_move_pct: float = 0.5
+
+    min_interval_s: float = 1.0
+    dedupe_window_s: float = 60.0
+
+
 class ScoutConfig(BaseModel):
     """RPi 1 behaviour."""
 
@@ -335,12 +444,22 @@ class Config(BaseModel):
     scout: ScoutConfig = Field(default_factory=ScoutConfig)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
+    providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    intel: IntelConfig = Field(default_factory=IntelConfig)
+    webhooks: WebhookConfigModel = Field(default_factory=WebhookConfigModel)
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+
+    # Runtime tuning — see runtime.py.
+    use_uvloop: bool = True
+    tune_gc: bool = True
 
     # --- Secrets, populated from the environment only ------------------------
     pumpportal_api_key: str | None = None
     x_bearer_token: str | None = None
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    discord_webhook_url: str | None = None
+    webhook_secret: str | None = None
     keystore_passphrase: str | None = None
 
     @model_validator(mode="after")
@@ -370,6 +489,28 @@ class Config(BaseModel):
             # Not an error — this is the safety latch doing its job. The Brain
             # logs loudly and falls back to paper.
             pass
+
+        # Secrets arrive as flat environment variables; wire them into the
+        # sections that actually consume them.
+        if self.webhook_secret and not self.webhooks.secret:
+            self.webhooks.secret = self.webhook_secret
+        if self.telegram_bot_token and self.telegram_chat_id:
+            self.alerts.telegram = True
+        if self.discord_webhook_url:
+            self.alerts.discord = True
+
+        # An inbound webhook that can trade but has no secret is an open door
+        # to your wallet. Refuse rather than warn.
+        if self.webhooks.enabled and self.webhooks.allow_trading and not self.webhooks.secret:
+            raise ValueError(
+                "webhooks.allow_trading is true but no webhook secret is set. "
+                "Set MCTB_WEBHOOK_SECRET to a long random string, or turn "
+                "allow_trading off. An unauthenticated endpoint that can open "
+                "positions is an open door to your wallet."
+            )
+
+        if self.intel.max_sybil_ratio > 1 or self.intel.max_sybil_ratio < 0:
+            raise ValueError("intel.max_sybil_ratio must be between 0 and 1")
         return self
 
     # --- Convenience ---------------------------------------------------------
@@ -428,8 +569,24 @@ def _env_overrides() -> dict[str, Any]:
     put(("x_bearer_token",), os.getenv("MCTB_X_BEARER_TOKEN"))
     put(("telegram_bot_token",), os.getenv("MCTB_TELEGRAM_BOT_TOKEN"))
     put(("telegram_chat_id",), os.getenv("MCTB_TELEGRAM_CHAT_ID"))
+    put(("discord_webhook_url",), os.getenv("MCTB_DISCORD_WEBHOOK_URL"))
+    put(("webhook_secret",), os.getenv("MCTB_WEBHOOK_SECRET"))
     put(("keystore_passphrase",), os.getenv("MCTB_KEYSTORE_PASSPHRASE"))
     put(("role",), os.getenv("MCTB_ROLE"))
+
+    # Provider API keys. One environment variable per provider, named
+    # MCTB_<PROVIDER>_API_KEY, collected into providers.keys.
+    provider_keys: dict[str, str] = {}
+    for provider in (
+        "birdeye", "helius", "solscan", "dune", "cielo", "nansen", "arkham",
+        "lunarcrush", "kaito", "dextools", "tokensniffer", "rugcheck", "jupiter",
+    ):
+        value = os.getenv(f"MCTB_{provider.upper()}_API_KEY")
+        if value:
+            provider_keys[provider] = value
+    if provider_keys:
+        env.setdefault("providers", {})["keys"] = provider_keys
+
     return env
 
 

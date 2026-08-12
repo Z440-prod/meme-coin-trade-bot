@@ -182,8 +182,76 @@ the price does anything at all. This is why `size_position()` refuses to open
 positions below 0.001 SOL, and why the paper executor models all four costs —
 a simulation without them will report a losing strategy as profitable.
 
+## The intelligence layer
+
+Layered on top of the three services, and entirely optional — with zero
+providers configured the trading logic is unchanged.
+
+```
+providers/          20+ vendors behind one interface
+  base.py             capabilities, tiers, health, graceful degradation
+  http.py             rate limiting · circuit breaking · caching · coalescing
+  registry.py         capability routing, parallel fan-out under one deadline
+        ↓
+intel/              turning many partial answers into one
+  fusion.py           blockers OR'd, quality medianed, disagreement recorded
+  graph.py            wallet clustering — which addresses are one actor
+  narrative.py        attention shape analysis (astroturf detection)
+  dossier.py          tiered enrichment: HOT / WARM / COLD / MANUAL
+        ↓
+brain/intel_gate.py bounded blockers and adjustments into the decision
+```
+
+### Tiered enrichment — the speed guarantee
+
+| Tier | Budget | Used for |
+|---|---|---|
+| `HOT` | ~0ms, **cache only** | the entry decision path |
+| `WARM` | ~400ms | candidate screening |
+| `COLD` | ~3s | open positions, terminal lookups |
+| `MANUAL` | unbounded | explicit deep dives |
+
+A `HOT` assembly performs **no network I/O**. It reads what background workers
+already fetched. That is what makes twenty providers compatible with
+sub-millisecond decisions: the data was gathered before it was needed.
+
+Cache misses are queued for background enrichment, so the next decision on
+that token is better informed — and if the answer turns out to be bad, an open
+position can still be exited on it.
+
+### Entity resolution
+
+The differentiated analysis. Wallets are clustered by:
+
+- **funding lineage** — same funder, excluding detected high-volume hubs
+- **temporal batching** — funded within 30 minutes of each other
+- **co-occurrence** — repeatedly buying the same obscure tokens seconds apart
+- **behavioural fingerprint** — identical average trade sizing across wallets
+
+Then a cluster **votes once**. Five wallets from one entity are one signal,
+not five. Union-Find keeps it near-linear, so it runs comfortably on a Pi.
+
+The same machinery detects deployer insiders: wallets sharing the creator's
+funding source, or created shortly before a launch and buying it instantly.
+
+### Execution routing
+
+`brain/router.py` picks per trade and re-checks on exit:
+
+- **on the bonding curve** → pump.fun, deterministic fill, no route search
+- **after graduation** → Jupiter aggregator
+
+Re-checking matters because tokens graduate mid-position. A curve-only bot
+watches an open position become unsellable.
+
+Before committing, the router estimates the **round-trip cost** — fees plus
+price impact both ways. Two quotes, no gas, and it catches the case where a
+buy route exists and a sell route does not.
+
 ## Further reading
 
+- [PROVIDERS.md](PROVIDERS.md) — all 28 integrations, honestly assessed
+- [AUTOMATION.md](AUTOMATION.md) — alerts, webhooks, TradingView/n8n/Zapier
 - [HARDWARE.md](HARDWARE.md) — what to buy and how to wire it
 - [STRATEGY.md](STRATEGY.md) — tuning, and what each parameter really does
 - [SAFETY.md](SAFETY.md) — read before funding a wallet

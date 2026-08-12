@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCTB Terminal</title>
+<style>
+  :root {
+    --bg:#07090d; --panel:#0e1219; --panel2:#151b26; --border:#1e2634;
+    --text:#c8d3e3; --dim:#5f6b80; --hi:#e8eef8;
+    --green:#00c896; --red:#ff5252; --amber:#ffb300; --blue:#40a9ff;
+    --purple:#b388ff; --cyan:#26c6da;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);color:var(--text);font:12px/1.45 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    height:100vh;overflow:hidden;display:flex;flex-direction:column;
+  }
+  ::-webkit-scrollbar{width:7px;height:7px}
+  ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  /* Command bar */
+  #cmdbar{
+    display:flex;align-items:center;gap:10px;padding:7px 12px;
+    background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0;
+  }
+  #logo{font-weight:700;letter-spacing:.14em;color:var(--hi);font-size:13px}
+  #cmd{
+    flex:1;background:var(--bg);border:1px solid var(--border);border-radius:3px;
+    color:var(--hi);font:inherit;padding:5px 10px;outline:none;
+  }
+  #cmd:focus{border-color:var(--blue)}
+  #cmd::placeholder{color:var(--dim)}
+  .pill{padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+  .pill.paper{background:#12304d;color:var(--blue)}
+  .pill.live{background:#4d1212;color:var(--red);animation:blink 1.6s infinite}
+  .pill.halted{background:#4d3d12;color:var(--amber)}
+  @keyframes blink{50%{opacity:.5}}
+
+  /* Layout */
+  #grid{flex:1;display:grid;gap:1px;background:var(--border);overflow:hidden;
+        grid-template-columns:1.15fr 1.5fr 1fr;grid-template-rows:1fr 1fr;}
+  .panel{background:var(--panel);display:flex;flex-direction:column;overflow:hidden;min-height:0}
+  .panel > header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:4px 9px;background:var(--panel2);border-bottom:1px solid var(--border);flex-shrink:0;
+  }
+  .panel h2{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);font-weight:700}
+  .panel .body{flex:1;overflow-y:auto;overflow-x:hidden;padding:5px 8px;min-height:0}
+  .wide{grid-column:span 2}
+
+  table{width:100%;border-collapse:collapse;font-size:11px}
+  th{text-align:left;color:var(--dim);font-weight:600;font-size:9px;text-transform:uppercase;
+     letter-spacing:.07em;padding:2px 5px;position:sticky;top:0;background:var(--panel);z-index:1}
+  td{padding:2px 5px;border-bottom:1px solid #131924;white-space:nowrap;
+     overflow:hidden;text-overflow:ellipsis;max-width:200px}
+  tr:hover td{background:var(--panel2)}
+  tr.sel td{background:#16304a}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .pos{color:var(--green)} .neg{color:var(--red)} .dim{color:var(--dim)}
+  .amber{color:var(--amber)} .blue{color:var(--blue)} .cy{color:var(--cyan)}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:1px 10px;font-size:11px}
+  .kv .k{color:var(--dim)}
+  .kv .v{text-align:right;font-variant-numeric:tabular-nums}
+
+  .tag{display:inline-block;font-size:9px;padding:0 5px;border-radius:2px;font-weight:700;margin-right:3px}
+  .t-ok{background:#0d3d30;color:var(--green)}
+  .t-bad{background:#3d1010;color:var(--red)}
+  .t-warn{background:#3d3010;color:var(--amber)}
+  .t-info{background:#12304d;color:var(--blue)}
+  .t-dim{background:var(--panel2);color:var(--dim)}
+
+  .bar{height:3px;background:var(--panel2);border-radius:2px;overflow:hidden;margin-top:2px}
+  .bar>div{height:100%;background:var(--green);transition:width .3s}
+  .bar.risk>div{background:var(--red)}
+
+  .row{padding:2px 4px;border-bottom:1px solid #131924;display:flex;gap:6px;align-items:baseline;font-size:11px}
+  .row .t{color:var(--dim);font-size:10px;flex-shrink:0}
+  .row .b{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .empty{color:var(--dim);font-style:italic;padding:16px;text-align:center;font-size:11px}
+  .blocker{background:#2a0f0f;border-left:2px solid var(--red);padding:3px 7px;margin:2px 0;font-size:10px;color:#ffcdd2}
+  .note{background:#0f1a2a;border-left:2px solid var(--blue);padding:3px 7px;margin:2px 0;font-size:10px;color:#bbdefb}
+
+  #status{display:flex;gap:14px;padding:3px 12px;background:var(--panel);
+          border-top:1px solid var(--border);font-size:10px;color:var(--dim);flex-shrink:0}
+  #status b{color:var(--text);font-weight:600}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:3px}
+  .d-ok{background:var(--green)} .d-bad{background:var(--red)} .d-warn{background:var(--amber)}
+
+  #help{position:fixed;inset:0;background:rgba(7,9,13,.96);z-index:100;display:none;
+        padding:40px;overflow-y:auto}
+  #help.on{display:block}
+  #help h3{color:var(--hi);margin-bottom:12px;font-size:14px}
+  #help .grp{margin-bottom:18px;max-width:760px}
+  #help code{background:var(--panel2);padding:1px 6px;border-radius:2px;color:var(--cyan)}
+  #help table{max-width:760px}
+
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  button{background:var(--panel2);border:1px solid var(--border);color:var(--text);
+         font:inherit;font-size:10px;padding:1px 7px;border-radius:2px;cursor:pointer}
+  button:hover{background:#1d2637}
+  button.danger{background:#3d1010;border-color:#5d1a1a;color:#ffcdd2}
+</style>
+</head>
+<body>
+
+<div id="cmdbar">
+  <span id="logo">MCTB</span>
+  <span id="mode" class="pill paper">paper</span>
+  <input id="cmd" placeholder="Command  (?  for help)  ·  paste a mint to load a dossier" autocomplete="off" spellcheck="false">
+  <span id="equity" class="dim"></span>
+</div>
+
+<div id="grid">
+  <section class="panel">
+    <header><h2>Positions</h2><span id="poscount" class="dim"></span></header>
+    <div class="body" id="positions"><div class="empty">No open positions</div></div>
+  </section>
+
+  <section class="panel">
+    <header>
+      <h2 id="dossierTitle">Dossier</h2>
+      <span id="dossierLinks"></span>
+    </header>
+    <div class="body" id="dossier">
+      <div class="empty">Paste a mint address, or press <b>d</b> on a selected row</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <header><h2>Providers</h2><span id="provcount" class="dim"></span></header>
+    <div class="body" id="providers"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section class="panel">
+    <header><h2 id="feedTitle">Decisions</h2>
+      <span><button onclick="setFeed('decisions')">dec</button>
+            <button onclick="setFeed('fills')">fill</button>
+            <button onclick="setFeed('alerts')">alrt</button></span>
+    </header>
+    <div class="body" id="feed"><div class="empty">Waiting…</div></div>
+  </section>
+
+  <section class="panel">
+    <header><h2>Entity clusters</h2><span id="graphstat" class="dim"></span></header>
+    <div class="body" id="graph"><div class="empty">Building…</div></div>
+  </section>
+
+  <section class="panel">
+    <header><h2>Performance &amp; latency</h2></header>
+    <div class="body" id="perf"><div class="empty">No closed trades yet</div></div>
+  </section>
+</div>
+
+<div id="status"></div>
+
+<div id="help">
+  <div class="grp">
+    <h3>Commands</h3>
+    <table>
+      <tr><td><code>&lt;mint&gt;</code></td><td class="dim">Load a dossier for that token</td></tr>
+      <tr><td><code>s &lt;query&gt;</code></td><td class="dim">Search tokens by name or symbol</td></tr>
+      <tr><td><code>w &lt;wallet&gt;</code></td><td class="dim">Wallet dossier and cluster</td></tr>
+      <tr><td><code>new</code></td><td class="dim">Newly launched tokens</td></tr>
+      <tr><td><code>hot</code></td><td class="dim">Promoted / boosted tokens (read sceptically)</td></tr>
+      <tr><td><code>deep</code></td><td class="dim">Re-run the current dossier at MANUAL tier</td></tr>
+      <tr><td><code>probe</code></td><td class="dim">Live-check every provider</td></tr>
+      <tr><td><code>kill</code> / <code>resume</code></td><td class="dim">Kill switch</td></tr>
+      <tr><td><code>close &lt;mint&gt;</code> / <code>closeall</code></td><td class="dim">Exit positions</td></tr>
+    </table>
+  </div>
+  <div class="grp">
+    <h3>Keys</h3>
+    <table>
+      <tr><td><code>/</code></td><td class="dim">Focus the command bar</td></tr>
+      <tr><td><code>j</code> / <code>k</code></td><td class="dim">Move down / up the position list</td></tr>
+      <tr><td><code>d</code></td><td class="dim">Dossier for the selected position</td></tr>
+      <tr><td><code>x</code></td><td class="dim">Exit the selected position</td></tr>
+      <tr><td><code>1</code>–<code>3</code></td><td class="dim">Switch the feed panel</td></tr>
+      <tr><td><code>?</code></td><td class="dim">This help</td></tr>
+      <tr><td><code>Esc</code></td><td class="dim">Close help / blur input</td></tr>
+    </table>
+  </div>
+  <div class="grp dim" style="font-size:11px">
+    Press <code>Esc</code> or <code>?</code> to close.
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+const n = (v,d=2) => (v===null||v===undefined||isNaN(v)) ? '—' : Number(v).toFixed(d);
+const sgn = (v,d=4) => (v>=0?'+':'') + n(v,d);
+const cls = v => v>0?'pos':(v<0?'neg':'dim');
+const clock = ts => new Date((ts||Date.now()/1000)*1000).toLocaleTimeString('en-GB');
+const usd = v => v>=1e9?'$'+(v/1e9).toFixed(2)+'B' : v>=1e6?'$'+(v/1e6).toFixed(2)+'M'
+              : v>=1e3?'$'+(v/1e3).toFixed(1)+'K' : '$'+n(v,2);
+const short = a => a ? a.slice(0,4)+'..'+a.slice(-4) : '';
+
+let S = {snapshot:null, decisions:[], fills:[], alerts:[], providers:null, graph:null,
+         perf:null, heartbeats:{}, dossier:null, feed:'decisions', sel:0};
+
+/* ---------------- positions ---------------- */
+function renderPositions(){
+  const el=$('positions'), ps=(S.snapshot&&S.snapshot.positions)||[];
+  $('poscount').textContent = ps.length ? ps.length+' open' : '';
+  if(!ps.length){el.innerHTML='<div class="empty">No open positions</div>';return;}
+  if(S.sel>=ps.length) S.sel=ps.length-1;
+
+  el.innerHTML='<table><thead><tr><th>Tok</th><th class="num">Mult</th><th class="num">P&L</th>'+
+    '<th class="num">Val</th><th class="num">Age</th><th></th></tr></thead><tbody>'+
+    ps.map((p,i)=>{
+      const mult = p.entry_price_sol>0 ? p.current_price_sol/p.entry_price_sol : 1;
+      const val  = p.tokens_held*p.current_price_sol;
+      const pnl  = p.realised_sol+val-p.cost_sol-p.fees_sol;
+      const age  = Math.round(Date.now()/1000 - p.opened_at);
+      return `<tr class="${i===S.sel?'sel':''}" onclick="selectPos(${i})">
+        <td><b>${esc(p.symbol||short(p.mint))}</b>${p.trailing_armed?'<span class="tag t-info">T</span>':''}</td>
+        <td class="num ${cls(mult-1)}">${n(mult,2)}x</td>
+        <td class="num ${cls(pnl)}">${sgn(pnl)}</td>
+        <td class="num">${n(val,4)}</td>
+        <td class="num dim">${age}s</td>
+        <td><button class="danger" onclick="event.stopPropagation();closePos('${esc(p.mint)}')">x</button></td>
+      </tr>`;}).join('')+'</tbody></table>';
+}
+window.selectPos = i => {S.sel=i; renderPositions();};
+window.closePos = m => { if(confirm('Sell this position at market now?')) post('/api/control/close_position?mint='+encodeURIComponent(m)); };
+
+/* ---------------- dossier ---------------- */
+function renderDossier(){
+  const el=$('dossier'), d=S.dossier;
+  if(!d){el.innerHTML='<div class="empty">Paste a mint address, or press <b>d</b> on a selected row</div>';
+         $('dossierTitle').textContent='Dossier'; $('dossierLinks').innerHTML=''; return;}
+
+  const sec=d.security||{}, mk=d.market||{}, nar=d.narrative||{};
+  $('dossierTitle').textContent = (d.symbol||d.mint.slice(0,10))+' · '+(d.tier_used||'').toUpperCase();
+  $('dossierLinks').innerHTML = Object.entries(d.links||{}).slice(0,5)
+    .map(([k,v])=>`<a href="${esc(v)}" target="_blank" rel="noopener" style="font-size:10px;margin-left:6px">${esc(k.split(' ')[0])}</a>`).join('');
+
+  const conf = (sec.provenance&&sec.provenance.confidence)||'none';
+  const srcs = (sec.provenance&&sec.provenance.sources)||[];
+  const safe = (sec.blockers||[]).length===0 && srcs.length>0;
+
+  let h = `<div style="margin-bottom:6px">
+    <span class="tag ${safe?'t-ok':'t-bad'}">${safe?'TRADEABLE':'BLOCKED'}</span>
+    <span class="tag t-dim">conf ${esc(conf)}</span>
+    ${srcs.length?`<span class="tag t-dim">${srcs.length} src</span>`:''}
+    ${d.assembly_ms?`<span class="tag t-dim">${n(d.assembly_ms,0)}ms</span>`:''}
+  </div>`;
+
+  (sec.blockers||[]).forEach(b=>h+=`<div class="blocker">${esc(b)}</div>`);
+  (d.cluster_warnings||[]).forEach(w=>h+=`<div class="note">${esc(w)}</div>`);
+
+  h+=`<div class="kv" style="margin-top:7px">
+    <span class="k">Price</span><span class="v">${mk.price_usd?'$'+mk.price_usd.toPrecision(4):'—'}</span>
+    <span class="k">Liquidity</span><span class="v">${usd(mk.liquidity_usd||0)}</span>
+    <span class="k">Mkt cap</span><span class="v">${usd(mk.market_cap||0)}</span>
+    <span class="k">Vol 24h</span><span class="v">${usd(mk.volume_24h||0)}</span>
+    <span class="k">Vol/Liq</span><span class="v ${(mk.volume_to_liquidity||0)>20?'amber':''}">${n(mk.volume_to_liquidity,1)}x</span>
+    <span class="k">Change 1h</span><span class="v ${cls(mk.change_1h)}">${n(mk.change_1h,1)}%</span>
+    <span class="k">Buys/Sells 5m</span><span class="v">${mk.buys_5m||0}/${mk.sells_5m||0}</span>
+    <span class="k">Unique 1h</span><span class="v">${mk.unique_wallets_1h||0}</span>
+    <span class="k">Holders</span><span class="v">${sec.holder_count||mk.holder_count||0}</span>
+  </div>`;
+
+  h+=`<div style="margin-top:8px"><span class="k dim">Risk score</span>
+      <div class="bar risk"><div style="width:${Math.min(100,sec.risk_score||0)}%"></div></div>
+      <span class="dim" style="font-size:10px">${n(sec.risk_score,0)}/100</span></div>`;
+
+  const wash = mk.wash_trade_suspicion||0;
+  if(wash>0.2) h+=`<div style="margin-top:6px"><span class="k dim">Wash-trade suspicion</span>
+      <div class="bar risk"><div style="width:${wash*100}%"></div></div>
+      <span class="${wash>0.6?'neg':'amber'}" style="font-size:10px">${n(wash*100,0)}%</span></div>`;
+
+  h+=`<div class="kv" style="margin-top:8px">
+    <span class="k">Mint auth</span><span class="v ${sec.mint_authority_live?'neg':'pos'}">${sec.mint_authority_live?'LIVE':'revoked'}</span>
+    <span class="k">Freeze auth</span><span class="v ${sec.freeze_authority_live?'neg':'pos'}">${sec.freeze_authority_live?'LIVE':'revoked'}</span>
+    <span class="k">Sellable</span><span class="v ${sec.sellable?'pos':'neg'}">${sec.sellable?'yes':'NO'}</span>
+    <span class="k">Top 10 hold</span><span class="v ${(sec.top10_holding_pct||0)>0.35?'amber':''}">${n((sec.top10_holding_pct||0)*100,1)}%</span>
+    <span class="k">LP</span><span class="v">${sec.lp_burned?'<span class="pos">burned</span>':(sec.lp_locked_pct?n(sec.lp_locked_pct*100,0)+'% locked':'—')}</span>
+  </div>`;
+
+  if(nar.mention_count){
+    h+=`<div class="kv" style="margin-top:8px">
+      <span class="k">Mentions</span><span class="v">${nar.mention_count}</span>
+      <span class="k">Quality accts</span><span class="v">${nar.quality_accounts||0}</span>
+      <span class="k">Astroturf</span><span class="v ${nar.astroturf_score>0.5?'neg':'pos'}">${n((nar.astroturf_score||0)*100,0)}%</span>
+    </div>`;
+    (nar.themes||[]).slice(0,3).forEach(t=>h+=`<div class="note">${esc(t)}</div>`);
+  }
+
+  if((sec.risk_flags||[]).length)
+    h+=`<div style="margin-top:6px">${sec.risk_flags.slice(0,8).map(f=>`<span class="tag t-warn">${esc(f)}</span>`).join('')}</div>`;
+
+  el.innerHTML=h;
+}
+
+/* ---------------- providers ---------------- */
+function renderProviders(){
+  const el=$('providers'), p=S.providers;
+  if(!p){el.innerHTML='<div class="empty">Loading…</div>';return;}
+  const c=p.coverage||{};
+  $('provcount').textContent=`${c.ready||0}/${c.total||0} ready`;
+
+  el.innerHTML='<table><thead><tr><th>Provider</th><th>Status</th><th class="num">Calls</th>'+
+    '<th class="num">ok%</th><th class="num">ms</th></tr></thead><tbody>'+
+    (p.providers||[]).map(pr=>{
+      const h=pr.health||{};
+      const st = pr.status==='ready'?'<span class="tag t-ok">ready</span>'
+              : pr.status==='unconfigured'?'<span class="tag t-dim">no key</span>'
+              : pr.status==='no_public_api'?'<span class="tag t-dim">link</span>'
+              : `<span class="tag t-warn">${esc(pr.status)}</span>`;
+      return `<tr><td>${esc(pr.display_name)}${pr.paid?'<span class="tag t-dim">$</span>':''}</td>
+        <td>${st}</td><td class="num dim">${h.calls||0}</td>
+        <td class="num ${h.success_rate<0.9?'amber':''}">${h.calls?n(h.success_rate*100,0):'—'}</td>
+        <td class="num dim">${h.avg_latency_ms?n(h.avg_latency_ms,0):'—'}</td></tr>`;
+    }).join('')+'</tbody></table>';
+
+  if((c.critical_gaps||[]).length)
+    el.innerHTML+=`<div class="blocker" style="margin-top:6px">Missing: ${c.critical_gaps.join(', ')}</div>`;
+}
+
+/* ---------------- feed ---------------- */
+window.setFeed = k => {S.feed=k; $('feedTitle').textContent=k[0].toUpperCase()+k.slice(1); renderFeed();};
+function renderFeed(){
+  const el=$('feed'), items=S[S.feed]||[];
+  if(!items.length){el.innerHTML='<div class="empty">Waiting…</div>';return;}
+  el.innerHTML=items.slice().reverse().slice(0,60).map(x=>{
+    if(S.feed==='decisions')
+      return `<div class="row"><span class="t">${clock(x.ts)}</span>
+        <span class="tag ${x.action==='buy'?'t-ok':'t-dim'}">${esc(x.action)}</span>
+        <span class="b"><b>${esc(x.symbol||short(x.mint))}</b> <span class="dim">${n(x.score,1)}</span>
+        ${x.action==='buy'?`<span class="pos">${n(x.size_sol,4)}</span>`:''}
+        <span class="dim">${esc((x.reason||'').slice(0,70))}</span></span></div>`;
+    if(S.feed==='fills')
+      return `<div class="row"><span class="t">${clock(x.ts)}</span>
+        <span class="tag ${x.side==='buy'?'t-ok':'t-warn'}">${esc(x.side)}</span>
+        <span class="b"><b>${esc(x.symbol||short(x.mint))}</b>
+        ${x.ok?`${n(x.sol_amount,4)} SOL`:'<span class="neg">FAILED</span>'}
+        <span class="dim">${esc(x.exit_reason||x.error||'')}</span>
+        ${x.paper?'':'<span class="tag t-bad">LIVE</span>'}</span></div>`;
+    return `<div class="row"><span class="t">${clock(x.ts)}</span>
+      <span class="tag ${x.level==='critical'?'t-bad':x.level==='warning'?'t-warn':'t-info'}">${esc(x.level)}</span>
+      <span class="b"><b>${esc(x.title)}</b> ${esc(x.message)}</span></div>`;
+  }).join('');
+}
+
+/* ---------------- graph ---------------- */
+function renderGraph(){
+  const el=$('graph'), g=S.graph;
+  if(!g||!g.stats){el.innerHTML='<div class="empty">Building…</div>';return;}
+  const s=g.stats;
+  $('graphstat').textContent=`${s.wallets||0}w / ${s.clusters||0}c`;
+  if(!(g.clusters||[]).length){
+    el.innerHTML=`<div class="empty">No multi-wallet entities detected yet<br>
+      <span style="font-size:10px">${s.wallets||0} wallets tracked across ${s.tokens_tracked||0} tokens</span></div>`;
+    return;
+  }
+  el.innerHTML=g.clusters.map(c=>`<div style="margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #131924">
+    <div><span class="tag t-warn">${esc(c.id)}</span><b>${c.size} wallets</b>
+      <span class="dim">conf ${n(c.confidence,2)}</span></div>
+    <div class="dim" style="font-size:10px;margin-top:1px">${esc((c.reasons||[])[0]||'linked on-chain')}</div>
+    <div class="dim" style="font-size:9px">${(c.members||[]).slice(0,4).map(short).join('  ')}${c.size>4?'  +'+(c.size-4):''}</div>
+  </div>`).join('');
+}
+
+/* ---------------- perf ---------------- */
+function renderPerf(){
+  const el=$('perf'), p=S.perf;
+  const hb=(S.heartbeats||{}).brain||{}, lat=(hb.detail&&hb.detail.latency)||{};
+  let h='';
+  if(p&&p.trades){
+    const pf = (p.profit_factor===null||!isFinite(p.profit_factor))?'∞':n(p.profit_factor,2);
+    h+=`<div class="kv">
+      <span class="k">Trades</span><span class="v">${p.trades}</span>
+      <span class="k">Win rate</span><span class="v">${n(p.win_rate*100,1)}%</span>
+      <span class="k">Total P&L</span><span class="v ${cls(p.total_pnl_sol)}">${sgn(p.total_pnl_sol)}</span>
+      <span class="k">Profit factor</span><span class="v ${p.profit_factor>=1?'pos':'neg'}">${pf}</span>
+      <span class="k">Max DD</span><span class="v neg">${n(p.max_drawdown_sol,4)}</span>
+      <span class="k">Avg hold</span><span class="v">${n(p.avg_hold_s,0)}s</span>
+    </div>`;
+  } else h+='<div class="empty">No closed trades yet</div>';
+
+  const keys=Object.keys(lat);
+  if(keys.length){
+    h+='<div style="margin-top:8px"><div class="k dim" style="font-size:10px;margin-bottom:2px">DECISION LATENCY (ms)</div>'+
+      '<table><thead><tr><th>path</th><th class="num">p50</th><th class="num">p99</th><th class="num">max</th></tr></thead><tbody>'+
+      keys.map(k=>{const v=lat[k];return `<tr><td class="dim">${esc(k)}</td>
+        <td class="num">${n(v.p50,2)}</td><td class="num ${v.p99>50?'amber':''}">${n(v.p99,2)}</td>
+        <td class="num dim">${n(v.max,1)}</td></tr>`;}).join('')+'</tbody></table></div>';
+  }
+  const it=(hb.detail&&hb.detail.intel)||{};
+  if(it.assemblies!==undefined){
+    h+=`<div class="kv" style="margin-top:8px">
+      <span class="k">Intel cache hit</span><span class="v">${n((it.hot_hit_rate||0)*100,0)}%</span>
+      <span class="k">Enriched (bg)</span><span class="v">${it.background_enrichments||0}</span>
+      <span class="k">Queue</span><span class="v">${it.queue_depth||0}</span>
+    </div>`;
+  }
+  el.innerHTML=h;
+}
+
+/* ---------------- status bar ---------------- */
+function renderStatus(){
+  const now=Date.now()/1000, hb=S.heartbeats||{};
+  const svc=['scout','brain'].map(k=>{
+    const h=hb[k]; if(!h) return `<span><span class="dot d-bad"></span>${k} down</span>`;
+    const age=now-h.ts, c=age>30?'d-bad':(h.healthy?'d-ok':'d-warn');
+    return `<span><span class="dot ${c}"></span>${k} ${age.toFixed(0)}s</span>`;
+  }).join('');
+  const s=S.snapshot;
+  $('status').innerHTML = svc +
+    (s?` <span>bank <b>${n(s.bankroll_sol,4)}</b></span>
+        <span>today <b class="${cls(s.daily_pnl_sol)}">${sgn(s.daily_pnl_sol)}</b></span>
+        <span>W/L <b>${s.wins_today}/${s.losses_today}</b></span>`:'') +
+    `<span style="margin-left:auto">? help</span>`;
+  if(s){
+    $('equity').textContent = n(s.bankroll_sol + (s.positions||[]).reduce((a,p)=>a+p.tokens_held*p.current_price_sol,0),4)+' SOL';
+    const m=$('mode'); m.textContent = s.halted?'halted':s.mode; m.className='pill '+(s.halted?'halted':s.mode);
+  }
+}
+
+/* ---------------- commands ---------------- */
+async function post(p){ try{ const r=await fetch(p,{method:'POST'}); return await r.json(); }catch(e){ return {error:String(e)}; } }
+async function get(p){ try{ const r=await fetch(p); return await r.json(); }catch(e){ return {error:String(e)}; } }
+
+async function loadDossier(mint, deep){
+  $('dossier').innerHTML='<div class="empty">Assembling…</div>';
+  const d=await get(`/api/token/${encodeURIComponent(mint)}${deep?'?deep=true':''}`);
+  if(d.error){$('dossier').innerHTML=`<div class="blocker">${esc(d.error)}</div>`;return;}
+  S.dossier=d; renderDossier();
+}
+
+async function runCommand(raw){
+  const line=raw.trim(); if(!line) return;
+  const [verb,...rest]=line.split(/\s+/); const arg=rest.join(' ');
+  const v=verb.toLowerCase();
+
+  if(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(line)) return loadDossier(line);
+
+  switch(v){
+    case '?': case 'help': $('help').classList.toggle('on'); break;
+    case 's': {
+      const r=await get('/api/search?q='+encodeURIComponent(arg));
+      $('dossier').innerHTML = (r.results||[]).length
+        ? '<table><thead><tr><th>Sym</th><th class="num">Price</th><th class="num">Liq</th><th class="num">24h</th></tr></thead><tbody>'+
+          r.results.map(x=>`<tr onclick="loadDossier('${esc(x.mint)}')" style="cursor:pointer">
+            <td><b>${esc(x.symbol)}</b></td><td class="num">${x.price_usd?'$'+x.price_usd.toPrecision(3):'—'}</td>
+            <td class="num">${usd(x.liquidity_usd)}</td>
+            <td class="num ${cls(x.change_24h)}">${n(x.change_24h,1)}%</td></tr>`).join('')+'</tbody></table>'
+        : '<div class="empty">No results</div>';
+      $('dossierTitle').textContent='Search: '+arg;
+      break;
+    }
+    case 'w': {
+      const d=await get('/api/wallet/'+encodeURIComponent(arg));
+      $('dossierTitle').textContent='Wallet '+short(arg);
+      $('dossier').innerHTML = d.error?`<div class="blocker">${esc(d.error)}</div>`:
+        `<div class="kv">
+          <span class="k">Cluster</span><span class="v">${d.cluster?esc(d.cluster.id)+' ('+d.cluster.size+')':'singleton'}</span>
+          <span class="k">Local score</span><span class="v">${n(d.local_score,2)}</span>
+          <span class="k">Copies</span><span class="v">${d.local_copies||0}</span>
+          <span class="k">Ext. PnL</span><span class="v ${cls(d.external_pnl_usd)}">${usd(d.external_pnl_usd||0)}</span>
+          <span class="k">Ext. winrate</span><span class="v">${n((d.external_winrate||0)*100,0)}%</span>
+          <span class="k">Fresh wallet</span><span class="v ${d.is_fresh_wallet?'amber':''}">${d.is_fresh_wallet?'yes':'no'}</span>
+          <span class="k">Funder</span><span class="v">${short(d.first_funder)||'—'}</span>
+        </div>${(d.labels||[]).map(l=>`<span class="tag t-info">${esc(l)}</span>`).join('')}
+        ${d.cluster?`<div class="note">${esc((d.cluster.reasons||[])[0]||'')}</div>`:''}`;
+      break;
+    }
+    case 'new': case 'hot': {
+      const r=await get('/api/discovery?kind='+(v==='new'?'new':'trending'));
+      $('dossierTitle').textContent = v==='new'?'New launches':'Promoted (paid)';
+      $('dossier').innerHTML=(r.items||[]).length
+        ? (v==='hot'?'<div class="note">Paid promotion is not a quality signal — it is what a launch with no organic interest buys.</div>':'')+
+          '<table><tbody>'+r.items.slice(0,25).map(x=>`<tr onclick="loadDossier('${esc(x.mint)}')" style="cursor:pointer">
+            <td>${short(x.mint)}</td><td class="dim">${esc((x.description||'').slice(0,44))}</td>
+            <td class="num dim">${x.boost_amount?n(x.boost_amount,0):''}</td></tr>`).join('')+'</tbody></table>'
+        : '<div class="empty">Nothing returned</div>';
+      break;
+    }
+    case 'deep': if(S.dossier) loadDossier(S.dossier.mint,true); break;
+    case 'probe': {
+      $('providers').innerHTML='<div class="empty">Probing…</div>';
+      await post('/api/providers/probe'); S.providers=await get('/api/providers'); renderProviders(); break;
+    }
+    case 'kill': if(confirm('Engage kill switch?')) await post('/api/control/kill'); break;
+    case 'resume': await post('/api/control/resume'); break;
+    case 'close': if(arg) await post('/api/control/close_position?mint='+encodeURIComponent(arg)); break;
+    case 'closeall': if(confirm('Sell EVERY open position?')) await post('/api/control/close_all'); break;
+    default: $('dossier').innerHTML=`<div class="blocker">Unknown command "${esc(v)}" — press ? for help</div>`;
+  }
+}
+
+$('cmd').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ runCommand($('cmd').value); $('cmd').value=''; }
+  if(e.key==='Escape'){ $('cmd').blur(); }
+});
+
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') return;
+  const ps=(S.snapshot&&S.snapshot.positions)||[];
+  switch(e.key){
+    case '/': e.preventDefault(); $('cmd').focus(); break;
+    case '?': $('help').classList.toggle('on'); break;
+    case 'Escape': $('help').classList.remove('on'); break;
+    case 'j': if(ps.length){S.sel=Math.min(S.sel+1,ps.length-1);renderPositions();} break;
+    case 'k': if(ps.length){S.sel=Math.max(S.sel-1,0);renderPositions();} break;
+    case 'd': if(ps[S.sel]) loadDossier(ps[S.sel].mint); break;
+    case 'x': if(ps[S.sel]) closePos(ps[S.sel].mint); break;
+    case '1': setFeed('decisions'); break;
+    case '2': setFeed('fills'); break;
+    case '3': setFeed('alerts'); break;
+  }
+});
+
+/* ---------------- live data ---------------- */
+let ws, retry=1000;
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  ws.onopen=()=>{retry=1000; setInterval(()=>{if(ws.readyState===1)ws.send('p');},20000);};
+  ws.onmessage=ev=>{
+    const m=JSON.parse(ev.data);
+    if(m.type==='init'){ S=Object.assign(S,m.data); renderAll(); return; }
+    if(m.type==='snapshot'){ S.snapshot=m.data; renderPositions(); renderStatus(); return; }
+    if(m.type==='decision'){ S.decisions.push(m.data); if(S.decisions.length>120)S.decisions.shift();
+                             if(S.feed==='decisions')renderFeed(); return; }
+    if(m.type==='fill'){ S.fills.push(m.data); if(S.fills.length>120)S.fills.shift();
+                         if(S.feed==='fills')renderFeed(); return; }
+    if(m.type==='alert'){ S.alerts.push(m.data); if(S.alerts.length>60)S.alerts.shift();
+                          if(S.feed==='alerts')renderFeed(); return; }
+  };
+  ws.onclose=()=>{setTimeout(connect,retry); retry=Math.min(retry*2,15000);};
+  ws.onerror=()=>ws.close();
+}
+connect();
+
+function renderAll(){renderPositions();renderDossier();renderProviders();renderFeed();renderGraph();renderPerf();renderStatus();}
+
+async function poll(){
+  const [st,pv,gr]=await Promise.all([get('/api/state'),get('/api/providers'),get('/api/graph')]);
+  if(!st.error){S.perf=st.performance;S.heartbeats=st.heartbeats;}
+  if(!pv.error)S.providers=pv;
+  if(!gr.error)S.graph=gr;
+  renderProviders();renderGraph();renderPerf();renderStatus();
+}
+poll(); setInterval(poll,10000);
+</script>
+</body>
+</html>

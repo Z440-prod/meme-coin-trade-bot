@@ -15,7 +15,8 @@ dependencies = [
     "PyYAML>=6.0",
     "redis>=5.0",
     "aiosqlite>=0.19",
-    "httpx>=0.26",
+    # h2 gives HTTP/2 connection multiplexing to providers that support it.
+    "httpx[http2]>=0.26",
     "websockets>=12.0",
     "orjson>=3.9",
     "rich>=13.7",
@@ -23,6 +24,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 2-4x faster event loop. Not a hard dependency because it does not build on
+# every platform, but install it anywhere you run this for real.
+speed = [
+    "uvloop>=0.19; sys_platform != 'win32'",
+]
 # Needed on the Brain (RPi 2) only: signing + encrypted keystore.
 trade = [
     "solders>=0.21",
@@ -38,6 +44,13 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.3",
+    "respx>=0.20",
+]
+# Everything, for a single-machine install.
+all = [
+    "solders>=0.21", "base58>=2.1", "cryptography>=42.0",
+    "fastapi>=0.109", "uvicorn[standard]>=0.27",
+    "uvloop>=0.19; sys_platform != 'win32'",
 ]
 
 [project.scripts]

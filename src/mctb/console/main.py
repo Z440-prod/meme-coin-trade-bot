@@ -21,13 +21,15 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..automation import WebhookConfig, WebhookReceiver
 from ..bus import Bus
 from ..config import Config
 from ..db import Database
+from ..intel import EntityGraph, IntelEngine, NarrativeEngine
 from ..logging_setup import setup_logging
 from ..models import (
     Alert,
@@ -39,6 +41,8 @@ from ..models import (
     PortfolioSnapshot,
     Topic,
 )
+from ..providers import ProviderRegistry, Tier
+from ..providers.links import all_token_links, all_wallet_links
 from .notify import BrowserOpener, Notifier
 from .supervisor import Supervisor
 
@@ -131,8 +135,100 @@ class Console:
         self.supervisor.send_command = self._send_command
         self.supervisor.send_alert = self._handle_alert
 
+        # --- Terminal intelligence -----------------------------------------
+        # The Console runs its own provider registry for user-driven lookups.
+        # Deliberately separate from the Brain's: a human typing a mint into
+        # the terminal must never consume the rate-limit budget the trading
+        # loop depends on.
+        self.registry = ProviderRegistry(config)
+        self.graph = EntityGraph()
+        self.intel = IntelEngine(self.registry, self.graph, NarrativeEngine(self.registry))
+
+        self.webhooks = WebhookReceiver(
+            WebhookConfig(
+                secret=config.webhooks.secret,
+                allow_trading=config.webhooks.allow_trading,
+                allow_kill=config.webhooks.allow_kill,
+                max_age_s=config.webhooks.max_age_s,
+                allowed_ips=config.webhooks.allowed_ips,
+            )
+        )
+        self._register_webhook_handlers()
+
         self._running = False
         self.app = self._build_app()
+
+    # -- webhook handlers ---------------------------------------------------
+
+    def _register_webhook_handlers(self) -> None:
+        """Map inbound webhook actions onto bus commands.
+
+        Every action becomes a normal ControlCommand, so an inbound webhook
+        can do exactly what the dashboard buttons can do and nothing more.
+        """
+
+        async def _kill(signal) -> dict:
+            await self.bus.set_kill_switch(True, f"webhook: {signal.reason or signal.source}")
+            await self._send_command(
+                ControlCommand(source="webhook", command="kill", value=signal.reason)
+            )
+            return {"killed": True}
+
+        async def _resume(_signal) -> dict:
+            await self.bus.set_kill_switch(False)
+            await self._send_command(ControlCommand(source="webhook", command="resume"))
+            return {"resumed": True}
+
+        async def _close_all(_signal) -> dict:
+            await self._send_command(ControlCommand(source="webhook", command="close_all"))
+            return {"closing": True}
+
+        async def _sell(signal) -> dict:
+            if not signal.mint:
+                return {"error": "mint required"}
+            await self._send_command(
+                ControlCommand(source="webhook", command="close_position", mint=signal.mint)
+            )
+            return {"closing": signal.mint}
+
+        async def _signal(signal) -> dict:
+            """Informational: surface it and enrich, but never auto-buy.
+
+            An external alert is evidence, not an instruction. It goes through
+            the same scoring the bot applies to everything else.
+            """
+            self.intel.request_enrichment(signal.mint, signal.symbol)
+            await self._handle_alert(
+                Alert(
+                    source=f"webhook.{signal.source}",
+                    level="info",
+                    title=f"External signal: {signal.symbol or signal.mint[:10]}",
+                    message=signal.reason or "no reason supplied",
+                )
+            )
+            return {"noted": True, "mint": signal.mint}
+
+        async def _dossier(signal) -> dict:
+            if not signal.mint:
+                return {"error": "mint required"}
+            dossier = await self.intel.assemble(
+                signal.mint, signal.symbol, tier=Tier.COLD, timeout_s=6.0
+            )
+            return dossier.model_dump(mode="json")
+
+        self.webhooks.on("kill", _kill)
+        self.webhooks.on("resume", _resume)
+        self.webhooks.on("close_all", _close_all)
+        self.webhooks.on("sell", _sell)
+        self.webhooks.on("signal", _signal)
+        self.webhooks.on("watch", _signal)
+        self.webhooks.on("note", _signal)
+        self.webhooks.on("dossier", _dossier)
+        # Deliberately no "buy" handler by default. Even with
+        # allow_trading: true, an inbound message routes through `signal` so
+        # the bot's own gates and scoring still decide. Wire a direct buy
+        # yourself only if you genuinely want an external system to be able to
+        # spend your funds without the bot's own checks.
 
     # -- bus plumbing -------------------------------------------------------
 
@@ -291,6 +387,158 @@ class Console:
         async def history(limit: int = 100) -> JSONResponse:
             return JSONResponse({"positions": await self.db.closed_positions(limit)})
 
+        # --- Terminal endpoints --------------------------------------------
+
+        @app.get("/terminal")
+        async def terminal() -> FileResponse:
+            return FileResponse(str(STATIC_DIR / "terminal.html"))
+
+        @app.get("/api/token/{mint}")
+        async def token_dossier(mint: str, deep: bool = False) -> JSONResponse:
+            """Full intelligence dossier for one token."""
+            if not (32 <= len(mint) <= 44):
+                return JSONResponse({"error": "not a valid mint address"}, status_code=400)
+            try:
+                dossier = await self.intel.assemble(
+                    mint,
+                    tier=Tier.MANUAL if deep else Tier.COLD,
+                    timeout_s=15.0 if deep else 6.0,
+                    include_narrative=True,
+                )
+                return JSONResponse(dossier.model_dump(mode="json"))
+            except Exception as exc:  # noqa: BLE001
+                log.exception("dossier assembly failed for %s", mint)
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.get("/api/wallet/{address}")
+        async def wallet_dossier(address: str) -> JSONResponse:
+            try:
+                intel = await self.intel.wallet_dossier(address, tier=Tier.MANUAL)
+                payload = intel.model_dump(mode="json")
+                payload["links"] = all_wallet_links(address)
+                cluster = self.graph.cluster_of(address)
+                payload["cluster"] = cluster.to_dict() if cluster else None
+                return JSONResponse(payload)
+            except Exception as exc:  # noqa: BLE001
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.get("/api/search")
+        async def search(q: str, limit: int = 20) -> JSONResponse:
+            provider = self.registry.get("dexscreener")
+            if provider is None or not provider.available:
+                return JSONResponse({"error": "search provider unavailable"}, status_code=503)
+            result = await provider.search(q, limit)  # type: ignore[attr-defined]
+            return JSONResponse({"results": result.data or [], "error": result.error})
+
+        @app.get("/api/discovery")
+        async def discovery(kind: str = "new", limit: int = 40) -> JSONResponse:
+            """Discovery feeds: new launches, or what is being promoted."""
+            method = "get_new_pairs" if kind == "new" else "get_trending"
+            from ..providers import Capability
+
+            capability = Capability.NEW_PAIRS if kind == "new" else Capability.TRENDING
+            results = await self.registry.query_all(
+                capability, method, limit, max_tier=Tier.COLD, timeout_s=8.0, limit=2
+            )
+            merged: list[dict] = []
+            seen: set[str] = set()
+            for result in results:
+                for row in result.data or []:
+                    mint = row.get("mint")
+                    if mint and mint not in seen:
+                        seen.add(mint)
+                        row["source"] = result.provider
+                        merged.append(row)
+            return JSONResponse({"kind": kind, "items": merged[:limit]})
+
+        @app.get("/api/providers")
+        async def providers() -> JSONResponse:
+            return JSONResponse(
+                {
+                    "providers": self.registry.describe(),
+                    "coverage": self.registry.coverage_report(),
+                    "capabilities": self.registry.capability_matrix(),
+                    "http": self.registry.http_stats(),
+                    "intel": self.intel.stats(),
+                }
+            )
+
+        @app.post("/api/providers/probe")
+        async def probe_providers() -> JSONResponse:
+            return JSONResponse({"results": await self.registry.probe_all()})
+
+        @app.get("/api/graph")
+        async def graph_view(limit: int = 15) -> JSONResponse:
+            return JSONResponse(
+                {"stats": self.graph.stats(), "clusters": self.graph.top_clusters(limit)}
+            )
+
+        @app.get("/api/links/{mint}")
+        async def links(mint: str) -> JSONResponse:
+            return JSONResponse(all_token_links(mint))
+
+        # --- Inbound webhooks (TradingView / Zapier / n8n) -----------------
+
+        @app.post("/webhook/{path_secret}")
+        async def inbound_webhook(path_secret: str, request: Request) -> JSONResponse:
+            if not self.config.webhooks.enabled:
+                return JSONResponse({"error": "webhooks disabled"}, status_code=404)
+
+            configured = self.config.webhooks.secret
+            if not configured:
+                return JSONResponse({"error": "no webhook secret configured"}, status_code=503)
+
+            # Constant-time path check so the URL cannot be brute-forced by
+            # timing.
+            import hmac as _hmac
+
+            if not _hmac.compare_digest(path_secret, configured):
+                log.warning("inbound webhook rejected: bad path secret")
+                return JSONResponse({"error": "not found"}, status_code=404)
+
+            client_ip = request.client.host if request.client else ""
+            if not self.webhooks.check_ip(client_ip):
+                log.warning("inbound webhook rejected: IP %s not allowed", client_ip)
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+
+            body = await request.body()
+
+            # HMAC is required for anything that can trade. Informational
+            # actions accept path-secret-only, since TradingView cannot sign.
+            signature = request.headers.get("X-MCTB-Signature", "")
+            timestamp = request.headers.get("X-MCTB-Timestamp", "")
+            signed = False
+            if signature:
+                ok, why = self.webhooks.verify_signature(body, signature, timestamp)
+                if not ok:
+                    log.warning("inbound webhook rejected: %s", why)
+                    return JSONResponse({"error": why}, status_code=401)
+                signed = True
+
+            signal = self.webhooks.parse(body, source=f"webhook/{client_ip}")
+            if signal is None:
+                return JSONResponse({"error": "unparseable payload"}, status_code=400)
+
+            from ..automation.inbound import TRADING_ACTIONS
+
+            if signal.action in TRADING_ACTIONS and not signed:
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"'{signal.action}' requires an HMAC signature. "
+                            "Send X-MCTB-Signature and X-MCTB-Timestamp headers."
+                        )
+                    },
+                    status_code=401,
+                )
+
+            result = await self.webhooks.dispatch(signal)
+            return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+        @app.get("/api/webhooks")
+        async def webhook_status() -> JSONResponse:
+            return JSONResponse(self.webhooks.stats())
+
         @app.post("/api/control/{command}")
         async def control(command: str, mint: str | None = None) -> JSONResponse:
             allowed = {"kill", "resume", "close_position", "close_all", "request_snapshot"}
@@ -339,6 +587,26 @@ class Console:
         await self.bus.connect()
         await self.db.connect()
         await self.notifier.connect()
+
+        try:
+            self.registry.build()
+            await self.registry.start()
+            coverage = self.registry.coverage_report()
+            log.info(
+                "terminal intel: %d/%d providers ready",
+                coverage["ready"], coverage["total"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("provider registry failed to start: %s", exc)
+
+        if self.config.webhooks.enabled and self.config.webhooks.secret:
+            log.warning(
+                "inbound webhooks live at POST /webhook/<secret> "
+                "(trading %s, kill %s)",
+                "ALLOWED" if self.config.webhooks.allow_trading else "blocked",
+                "allowed" if self.config.webhooks.allow_kill else "blocked",
+            )
+
         self._running = True
 
         # Replay recent journal entries so the dashboard has context on start.
@@ -353,6 +621,9 @@ class Console:
 
     async def stop(self) -> None:
         self._running = False
+        self.intel.stop()
+        with contextlib.suppress(Exception):
+            await self.registry.close()
         await self.notifier.close()
         await self.db.close()
         await self.bus.close()
