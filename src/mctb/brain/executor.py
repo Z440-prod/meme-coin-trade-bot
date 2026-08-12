@@ -67,12 +67,40 @@ class PaperExecutor(Executor):
 
     paper = True
 
-    def __init__(self, config: Config, rpc: SolanaRPC, oracle: PriceOracle) -> None:
+    def __init__(
+        self,
+        config: Config,
+        rpc: SolanaRPC,
+        oracle: PriceOracle,
+        router: Any = None,
+    ) -> None:
         self.config = config
         self.rpc = rpc
         self.oracle = oracle
+        # Optional aggregator routing. Without it a token that graduates off
+        # the bonding curve becomes unpriceable and therefore unsellable —
+        # and graduation is what happens to the tokens that WORKED.
+        self.router = router
         self._bankroll = config.execution.paper_starting_bankroll_sol
         self.fills = 0
+
+    async def _route_quote(self, mint: str, *, side: str, amount: float) -> float:
+        """Price a fill via the aggregator when the bonding curve is gone.
+
+        Returns 0.0 if no route exists, which the callers treat as genuinely
+        unsellable rather than as a transient failure.
+        """
+        if self.router is None:
+            return 0.0
+        try:
+            if side == "sell":
+                decision = await self.router.choose_sell_venue(mint, amount)
+            else:
+                decision = await self.router.choose_buy_venue(mint, amount)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("route quote failed for %s: %s", mint, exc)
+            return 0.0
+        return decision.expected_out if decision.tradeable else 0.0
 
     async def bankroll(self) -> float:
         return self._bankroll
@@ -110,14 +138,23 @@ class PaperExecutor(Executor):
         except Exception as exc:  # noqa: BLE001
             log.debug("paper buy curve read failed for %s: %s", mint, exc)
 
+        # Curve gone or complete: the token has graduated to a DEX. Route
+        # through the aggregator rather than declaring it untradeable.
+        if tokens <= 0:
+            tokens = await self._route_quote(mint, side="buy", amount=sol_amount)
+
         if tokens <= 0 or price <= 0:
             price = await self.oracle.price(mint)
-            if price <= 0:
-                return Fill(
-                    source="paper", mint=mint, symbol=symbol, side="buy", ok=False,
-                    error="no price available", paper=True,
-                )
-            tokens = sol_amount / price
+            if price <= 0 or tokens <= 0:
+                if tokens > 0 and price <= 0:
+                    price = sol_amount / tokens
+                else:
+                    return Fill(
+                        source="paper", mint=mint, symbol=symbol, side="buy", ok=False,
+                        error="no price available on any venue", paper=True,
+                    )
+            if tokens <= 0:
+                tokens = sol_amount / price
 
         # Adverse fill on top of curve impact: someone else's transaction
         # landed between your decision and your inclusion.
@@ -158,6 +195,12 @@ class PaperExecutor(Executor):
                 proceeds = curve.sol_out_for_tokens(token_amount, apply_fee=True)
         except Exception as exc:  # noqa: BLE001
             log.debug("paper sell curve read failed for %s: %s", mint, exc)
+
+        # Curve gone: the token graduated. Ask the aggregator before writing
+        # the position off — this is the difference between banking a winner
+        # and recording it as a total loss.
+        if proceeds <= 0:
+            proceeds = await self._route_quote(mint, side="sell", amount=token_amount)
 
         if proceeds <= 0:
             price = await self.oracle.price(mint)
@@ -208,13 +251,61 @@ class LiveExecutor(Executor):
 
     paper = False
 
-    def __init__(self, config: Config, rpc: SolanaRPC, keypair: Any) -> None:
+    def __init__(
+        self, config: Config, rpc: SolanaRPC, keypair: Any, router: Any = None
+    ) -> None:
         self.config = config
         self.rpc = rpc
         self.keypair = keypair
+        self.router = router
         self.pubkey = str(keypair.pubkey())
         self._client: httpx.AsyncClient | None = None
         self._bankroll_cache: tuple[float, float] = (0.0, 0.0)
+
+    async def _try_route(
+        self, mint: str, *, side: str, amount: float, symbol: str, reason: str, urgent: bool
+    ) -> Fill | None:
+        """Execute via the aggregator when the bonding curve is not the venue.
+
+        Returns None when the curve is still live, so the caller falls through
+        to the normal pump.fun path.
+        """
+        if self.router is None:
+            return None
+        try:
+            decision = (
+                await self.router.choose_sell_venue(mint, amount)
+                if side == "sell"
+                else await self.router.choose_buy_venue(mint, amount)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("routing failed for %s: %s", mint, exc)
+            return None
+
+        # Curve still live — pump.fun is the venue, and its fills are
+        # deterministic. Nothing to route.
+        if decision.venue.value == "pump_curve":
+            return None
+
+        if not decision.tradeable:
+            log.error(
+                "no venue can %s %s: %s", side, symbol or mint[:10], decision.reason
+            )
+            return Fill(
+                source="live", mint=mint, symbol=symbol, side=side, ok=False,  # type: ignore[arg-type]
+                error=f"no venue available: {decision.reason}", paper=False,
+                exit_reason=reason,
+            )
+
+        log.warning(
+            "routing %s of %s via %s (%s)",
+            side, symbol or mint[:10],
+            " > ".join(decision.route_labels or ["jupiter"]), decision.reason,
+        )
+        return await self.router.execute_jupiter(
+            decision, self.keypair, side=side, mint=mint,
+            symbol=symbol, reason=reason, urgent=urgent,
+        )
 
     async def connect(self) -> None:
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -303,6 +394,13 @@ class LiveExecutor(Executor):
 
     async def buy(self, mint: str, sol_amount: float, symbol: str = "") -> Fill:
         started = time.time()
+
+        routed = await self._try_route(
+            mint, side="buy", amount=sol_amount, symbol=symbol, reason="", urgent=False
+        )
+        if routed is not None:
+            return routed
+
         ok, signature, error = await self._build_and_send(
             "buy",
             mint,
@@ -351,8 +449,18 @@ class LiveExecutor(Executor):
     ) -> Fill:
         started = time.time()
         exec_cfg = self.config.execution
-        balance_before = await self.rpc.get_balance_sol(self.pubkey)
 
+        # Check the venue FIRST on exits. Tokens graduate mid-position, and a
+        # bot that cannot follow them to their new venue is a bot holding an
+        # unsellable winner.
+        routed = await self._try_route(
+            mint, side="sell", amount=token_amount, symbol=symbol,
+            reason=reason, urgent=urgent,
+        )
+        if routed is not None:
+            return routed
+
+        balance_before = await self.rpc.get_balance_sol(self.pubkey)
         fee = exec_cfg.exit_priority_fee_sol if urgent else exec_cfg.priority_fee_sol
         last_error = ""
 
@@ -420,7 +528,7 @@ class LiveExecutor(Executor):
 
 
 async def build_executor(
-    config: Config, rpc: SolanaRPC, oracle: PriceOracle
+    config: Config, rpc: SolanaRPC, oracle: PriceOracle, router: Any = None
 ) -> Executor:
     """Construct the right executor, enforcing both safety latches.
 
@@ -434,15 +542,19 @@ async def build_executor(
                 "execution.mode is 'live' but execution.live_trading_enabled is false. "
                 "Running in PAPER mode. Set both to trade real money."
             )
-        log.info("paper executor: starting bankroll %.4f SOL", config.execution.paper_starting_bankroll_sol)
-        return PaperExecutor(config, rpc, oracle)
+        log.info(
+            "paper executor: starting bankroll %.4f SOL%s",
+            config.execution.paper_starting_bankroll_sol,
+            "" if router is not None else " (no router — graduated tokens will not price)",
+        )
+        return PaperExecutor(config, rpc, oracle, router)
 
     from ..keystore import keypair_from_keystore
 
     keystore_path = config.resolve(config.paths.keystore_path)
     keypair = keypair_from_keystore(keystore_path, config.keystore_passphrase)
 
-    executor = LiveExecutor(config, rpc, keypair)
+    executor = LiveExecutor(config, rpc, keypair, router)
     await executor.connect()
 
     balance = await executor.bankroll()

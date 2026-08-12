@@ -510,6 +510,7 @@ def token(mint: str, config: Path | None = ConfigOpt, deep: bool = False) -> Non
     """Assemble and print an intelligence dossier for one token."""
     from .intel import IntelEngine
     from .providers import ProviderRegistry, Tier
+    from .solana.rpc import SolanaRPC
 
     cfg = _load(config)
 
@@ -517,7 +518,11 @@ def token(mint: str, config: Path | None = ConfigOpt, deep: bool = False) -> Non
         registry = ProviderRegistry(cfg)
         registry.build()
         await registry.start()
-        engine = IntelEngine(registry)
+        # Without an RPC, a token still on its bonding curve reports $0
+        # liquidity here — no DEX pool exists for it yet.
+        rpc = SolanaRPC(cfg.rpc.url, cfg.rpc.fallback_url, cfg.rpc.timeout_s)
+        await rpc.connect()
+        engine = IntelEngine(registry, rpc=rpc)
         try:
             dossier = await engine.assemble(
                 mint, tier=Tier.MANUAL if deep else Tier.COLD,
@@ -570,6 +575,7 @@ def token(mint: str, config: Path | None = ConfigOpt, deep: bool = False) -> Non
                 f"{k}: {v}" for k, v in list(dossier.links.items())[:4]
             ) + "[/dim]")
         finally:
+            await rpc.close()
             await registry.close()
 
     asyncio.run(main_())

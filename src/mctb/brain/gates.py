@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 from ..config import Config
 from ..models import Candidate
@@ -141,8 +142,13 @@ class RiskGate:
     exposure or down to your last SOL of gas money.
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, clock: Callable[[], float] | None = None) -> None:
         self.config = config
+        # Injectable so the simulator's virtual clock drives the rate limits.
+        # With a wall clock, a simulation that compresses four hours into a few
+        # seconds would trip the hourly caps immediately and never reset them,
+        # silently invalidating every result for a high-frequency preset.
+        self.clock = clock or time.time
         self._recent_opens: list[float] = []
         self._recent_sol: list[tuple[float, float]] = []
         self.consecutive_losses = 0
@@ -151,7 +157,7 @@ class RiskGate:
         self.halted_until = 0.0
 
     def record_open(self, size_sol: float) -> None:
-        now = time.time()
+        now = self.clock()
         self._recent_opens.append(now)
         self._recent_sol.append((now, size_sol))
 
@@ -169,7 +175,7 @@ class RiskGate:
     def halt(self, reason: str) -> None:
         self.halted = True
         self.halt_reason = reason
-        self.halted_until = time.time() + self.config.risk.cooldown_after_halt_s
+        self.halted_until = self.clock() + self.config.risk.cooldown_after_halt_s
         log.warning("TRADING HALTED: %s", reason)
 
     def resume(self) -> None:
@@ -180,7 +186,7 @@ class RiskGate:
         log.info("trading resumed")
 
     def _prune(self) -> None:
-        cutoff = time.time() - 3600
+        cutoff = self.clock() - 3600
         self._recent_opens = [t for t in self._recent_opens if t > cutoff]
         self._recent_sol = [(t, s) for t, s in self._recent_sol if t > cutoff]
 
@@ -197,10 +203,10 @@ class RiskGate:
         risk = self.config.risk
 
         if self.halted:
-            if time.time() >= self.halted_until:
+            if self.clock() >= self.halted_until:
                 self.resume()
             else:
-                remaining = self.halted_until - time.time()
+                remaining = self.halted_until - self.clock()
                 result.fail(f"halted for another {remaining / 60:.0f} min: {self.halt_reason}")
                 return result
 

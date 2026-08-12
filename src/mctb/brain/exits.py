@@ -103,11 +103,34 @@ def evaluate_exit(
     multiple = price / entry
     gain_pct = multiple - 1.0
 
+    # --- The runner ---------------------------------------------------------
+    # Once a position has paid for itself and only the reserved runner is
+    # left, the rules that would close it are switched off. Every large
+    # memecoin run contains drawdowns that a trailing stop or a max-hold timer
+    # would exit into, so a system with those always on cannot produce an
+    # outsized outcome no matter how good its entries are.
+    #
+    # The downside is already bounded: the stake is back, so the runner can go
+    # to zero and cost nothing.
+    riding = (
+        config.runner_fraction > 0
+        and position.is_runner_only(config.runner_fraction)
+        and (position.cost_recovered or not config.runner_requires_cost_recovered)
+    )
+
     # --- 2. Rug signals -----------------------------------------------------
-    if dev_sold and config.exit_on_dev_sell:
+    # A rug still empties even a free runner — salvaging something beats
+    # riding to zero deliberately.
+    rug_exits_runner = config.runner_exits_on_rug
+
+    if dev_sold and config.exit_on_dev_sell and (rug_exits_runner or not riding):
         return ExitAction(kind="full", fraction=1.0, reason="dev_sold", urgent=True)
 
-    if smart_wallets_exited and config.exit_on_smart_wallet_exit:
+    if (
+        smart_wallets_exited
+        and config.exit_on_smart_wallet_exit
+        and (rug_exits_runner or not riding)
+    ):
         return ExitAction(
             kind="full", fraction=1.0, reason="smart_wallets_exited", urgent=True
         )
@@ -116,7 +139,10 @@ def evaluate_exit(
         return ExitAction(kind="full", fraction=1.0, reason="migrated", urgent=False)
 
     # --- 3. Stop loss -------------------------------------------------------
-    if gain_pct <= -abs(config.stop_loss_pct):
+    # Skipped for a free runner: there is nothing left to protect. Stopping
+    # out a house-money position at -35% only guarantees you are not holding
+    # it if it later runs.
+    if not riding and gain_pct <= -abs(config.stop_loss_pct):
         return ExitAction(
             kind="full",
             fraction=1.0,
@@ -126,7 +152,9 @@ def evaluate_exit(
 
     # --- 4. Trailing stop ---------------------------------------------------
     # Arms once the position has proved itself, then follows the peak down.
-    if position.trailing_armed and position.peak_price_sol > 0:
+    # Never applied to a free runner — a 30% pullback is normal inside a 100x,
+    # and trailing out of it is how a runner becomes a 3x.
+    if not riding and position.trailing_armed and position.peak_price_sol > 0:
         drop = (position.peak_price_sol - price) / position.peak_price_sol
         if drop >= config.trailing_distance_pct:
             return ExitAction(
@@ -151,6 +179,16 @@ def evaluate_exit(
             # The rung's fraction is of the ORIGINAL position, so convert it
             # to a fraction of what is left.
             target_tokens = position.tokens_bought * rung["fraction"]
+
+            # Never sell into the reserved runner. Without this the ladder
+            # eventually consumes the whole position and there is nothing left
+            # to catch a large move.
+            runner = position.runner_tokens(config.runner_fraction)
+            sellable = max(0.0, position.tokens_held - runner)
+            if sellable <= 0:
+                continue
+            target_tokens = min(target_tokens, sellable)
+
             fraction_of_held = min(1.0, target_tokens / position.tokens_held)
             if fraction_of_held <= 0.01:
                 continue
@@ -163,6 +201,12 @@ def evaluate_exit(
             )
 
     # --- 6. Time-based ------------------------------------------------------
+    # A free runner has no clock. This is the single most important exemption
+    # in the file: a 100x takes hours or days, and any max-hold timer
+    # guarantees you are not holding when it happens.
+    if riding:
+        return NO_EXIT
+
     if age >= config.max_hold_s:
         return ExitAction(
             kind="full",

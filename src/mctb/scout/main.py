@@ -86,6 +86,10 @@ class Scout:
             config.rpc.ws_url,
             self.rpc,
             on_new_token=self._on_new_token,
+            # Trades decoded straight from program logs. Without a PumpPortal
+            # API key this is the ONLY source of trade data, and without trade
+            # data nothing can ever score highly enough to become a candidate.
+            on_trade=self._on_chain_trade,
             enabled=config.scout.enable_rpc_watcher,
         )
         self.social = SocialMonitor(
@@ -173,6 +177,20 @@ class Scout:
         self.watchlist.add(obs)
         self.wallets.observe_new_token(event.mint, 0.0, event.sol_in_curve)
 
+        # Subscribe to this token's trades immediately.
+        #
+        # This is not optional — it breaks a deadlock. A brand-new token has
+        # no buyers, no buy/sell ratio and no velocity, so its triage score is
+        # near zero and it would never qualify for the on-chain safety screen.
+        # But the screen is what used to trigger the subscription, so the token
+        # could never accumulate the very data needed to judge it. Without
+        # this, the Scout emits zero candidates for ever unless a seeded smart
+        # wallet happens to trade.
+        #
+        # Subscriptions are metered, so this is capped and the oldest quiet
+        # token is evicted to make room for newer launches.
+        await self._maybe_subscribe_token(obs)
+
         await self.db.record_token(
             event.mint, event.name, event.symbol, event.creator, event.initial_buy_sol
         )
@@ -192,6 +210,31 @@ class Scout:
         # Relaying the whole firehose would swamp the bus for no benefit.
         if obs.subscribed:
             await self.bus.publish(Topic.TOKEN_TRADE, event, journal=False)
+
+    async def _on_chain_trade(self, event: TradeEvent) -> None:
+        """A trade decoded from pump.fun program logs.
+
+        This is the firehose — every trade on the whole program — so it is
+        filtered to the watchlist immediately. Tokens we are not tracking are
+        dropped without further work.
+        """
+        obs = self.watchlist.get(event.mint)
+        if obs is None:
+            return
+
+        smart = (
+            self.wallets.score_for(event.trader)
+            if self.wallets.is_tracked(event.trader)
+            else 0.0
+        )
+        obs.apply_trade(event, smart_score=smart)
+        self.wallets.observe_trade(event)
+
+        # Relay to the Brain so its entity graph and exit logic see it.
+        await self.bus.publish(Topic.TOKEN_TRADE, event, journal=False)
+
+        if smart > 0 and event.is_buy:
+            await self.bus.publish(Topic.WALLET_TRADE, event)
 
     async def _on_wallet_trade(self, event: TradeEvent) -> None:
         """A wallet we deliberately follow just traded — the strongest signal
@@ -378,9 +421,31 @@ class Scout:
             await self._maybe_subscribe_token(obs)
 
     async def _maybe_subscribe_token(self, obs: TokenObservation) -> None:
-        subscribed = sum(1 for o in self.watchlist.all() if o.subscribed)
-        if subscribed >= self.config.scout.max_subscribed_tokens:
+        """Subscribe to a token's trade stream, within the metered budget.
+
+        When the budget is full, the oldest token with no traction is dropped
+        to make room. A launch that has attracted nothing in several minutes
+        is not going to, and the slot is worth more spent on a fresh one.
+        """
+        if obs.subscribed or obs.migrated:
             return
+
+        cap = self.config.scout.max_subscribed_tokens
+        subscribed = [o for o in self.watchlist.all() if o.subscribed]
+
+        if len(subscribed) >= cap:
+            # Evict the least interesting: no tracked wallet involved, oldest,
+            # fewest buyers. Never evict something a smart wallet is in.
+            evictable = [o for o in subscribed if not o.smart_wallets]
+            if not evictable:
+                return
+            victim = min(evictable, key=lambda o: (len(o.buyers), -o.age_s))
+            # Only evict for a genuinely newer token.
+            if victim.age_s < obs.age_s:
+                return
+            victim.subscribed = False
+            await self.feed.unsubscribe_tokens([victim.mint])
+
         obs.subscribed = True
         await self.feed.subscribe_tokens([obs.mint])
 

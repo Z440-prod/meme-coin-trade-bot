@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import statistics
 import time
+from typing import Any
 
 from ..providers import Capability, ProviderRegistry, Tier
 from ..providers.links import all_token_links
@@ -221,8 +222,17 @@ async def fuse_market(
     max_tier: Tier = Tier.WARM,
     timeout_s: float = 2.5,
     sol_price_usd: float = 0.0,
+    rpc: Any = None,
 ) -> MarketIntel:
-    """Combine market-data providers into one price/liquidity view."""
+    """Combine market-data providers into one price/liquidity view.
+
+    `rpc`, when supplied, is used to recover liquidity for tokens still on a
+    bonding curve. DEX aggregators correctly report zero liquidity for those —
+    there is no DEX pair yet — but the curve's real SOL reserves *are* the
+    liquidity, and without that substitution every liquidity-derived measure
+    (most importantly wash-trade suspicion) silently fails to compute on the
+    exact token class this system targets.
+    """
     started = time.perf_counter()
     results = await registry.query_all(
         Capability.TOKEN_MARKET,
@@ -299,6 +309,20 @@ async def fuse_market(
         if spread > 0.15:
             prov.disagreed.append(f"price_spread_{spread:.0%}")
 
+    # --- Bonding-curve liquidity fallback ----------------------------------
+    if intel.liquidity_usd <= 0 and rpc is not None:
+        try:
+            curve = await rpc.get_bonding_curve(mint)
+        except Exception:  # noqa: BLE001
+            curve = None
+        if curve is not None and not curve.complete:
+            sol_price = sol_price_usd or await _sol_price_usd(registry)
+            if sol_price > 0:
+                # The curve holds SOL on one side; a swap has to come out of
+                # it, so that is the tradeable depth.
+                intel.liquidity_usd = curve.sol_in_curve * sol_price
+                prov.sources.append("bonding_curve")
+
     # --- Derived quality measures ------------------------------------------
     if intel.liquidity_usd > 0:
         intel.volume_to_liquidity = intel.volume_24h / intel.liquidity_usd
@@ -325,6 +349,30 @@ async def fuse_market(
 
     intel.provenance = prov.to_dict()
     return intel
+
+
+#: SOL/USD, cached briefly. Used to express curve depth in dollars so it is
+#: comparable with DEX-reported liquidity.
+_SOL_PRICE: tuple[float, float] = (0.0, 0.0)
+
+
+async def _sol_price_usd(registry: ProviderRegistry, max_age_s: float = 300.0) -> float:
+    global _SOL_PRICE
+    ts, price = _SOL_PRICE
+    if price > 0 and (time.time() - ts) < max_age_s:
+        return price
+
+    jupiter = registry.get("jupiter")
+    if jupiter is not None and jupiter.available:
+        try:
+            result = await jupiter.get_prices(["So11111111111111111111111111111111111111112"])
+            fresh = (result.data or {}).get("So11111111111111111111111111111111111111112", 0.0)
+            if fresh > 0:
+                _SOL_PRICE = (time.time(), float(fresh))
+                return float(fresh)
+        except Exception:  # noqa: BLE001
+            pass
+    return price  # last known, or 0.0 if we have never had one
 
 
 async def fuse_all(

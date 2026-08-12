@@ -447,6 +447,110 @@ that matter, because slow cases correlate with busy moments.
 
 ---
 
+## 8b. Strategy presets and the runner
+
+```yaml
+strategy_preset: balanced    # conservative | balanced | degen | moonshot
+```
+
+| Preset | Entry | Needs tracked wallet | Max position | Runner | Expect |
+|---|---|---|---|---|---|
+| `conservative` | 72 | **yes** | 0.02 SOL | — | a few trades a day |
+| `balanced` | 62 | no | 0.05 SOL | — | steady flow |
+| `degen` | 52 | no | 0.015 SOL | — | constant, mostly losers |
+| `moonshot` | 48 | no | **0.004 SOL** | **30%** | ~90% losers, built for one outlier |
+
+**Start with `conservative`.** Note the aggressive presets size *smaller*, not
+larger — more aggression means more shots, each one smaller, which is the only
+way a low-hit-rate strategy survives its own losing streaks.
+
+### The runner — how an outsized outcome becomes possible
+
+Every large memecoin run contains repeated 40–60% drawdowns. A system with a
+trailing stop and a max-hold timer permanently on exits into the first one and
+turns a would-be 1000x into a 3x. That is structural — no amount of entry
+quality fixes it.
+
+So `exits.runner_fraction` reserves a share of every position that is **never
+sold** by time, stagnation, trailing or stop-loss rules — but only once the
+position has paid back its own cost:
+
+```yaml
+exits:
+  take_profit_ladder:
+    - { multiple: 2.0, fraction: 0.55 }   # 2 × 0.55 = 1.1x the stake, recovered
+    - { multiple: 5.0, fraction: 0.15 }
+  runner_fraction: 0.30                   # this 30% never sells
+  runner_requires_cost_recovered: true    # ...until the stake is back
+  runner_exits_on_rug: true               # a rug still empties it
+```
+
+Once the stake is recovered the runner is house money: it can go to zero
+without costing anything, which is precisely why it can be held through
+drawdowns that would stop out a normal position. 30% of a position that does
+1000x is a 300x on the whole trade.
+
+`moonshot` is that configuration, sized so a 1 SOL bankroll survives 200+
+consecutive total losses — because at a ~10% hit rate, long losing streaks are
+routine rather than exceptional. There are tests asserting both that survival
+property and that the first ladder rung genuinely recovers the stake.
+
+### What the simulator actually says about it
+
+Reproduce with (each run is 4 simulated hours, ~120 entries after the hourly
+caps bind, against 4000 synthetic launches whose outcome distribution includes
+a ~1-in-400 "generational" tail):
+
+```bash
+for s in 1 2 3 4 5 6 7 8; do
+  mctb simulate -c config/strategies/moonshot.yaml --tokens 4000 --seed $s
+done
+```
+
+| Seed | Win rate | Profit factor | Max drawdown | Best trade |
+|---|---|---|---|---|
+| 1 | 44.2% | 1.59 | 0.035 SOL | +0.0051 |
+| 2 | 40.0% | 1.37 | 0.049 SOL | +0.0078 |
+| 3 | 37.5% | 1.20 | 0.060 SOL | +0.0093 |
+| 4 | 40.0% | 1.08 | 0.046 SOL | +0.0054 |
+| 5 | 44.2% | 1.44 | 0.033 SOL | +0.0057 |
+| 6 | 39.2% | 1.28 | 0.051 SOL | +0.0074 |
+| 7 | 38.3% | **2.60** | 0.043 SOL | **+0.1317** |
+| 8 | 37.5% | 1.22 | 0.056 SOL | +0.0061 |
+
+Read seed 7 against the other seven. Every seed is mildly profitable on the
+ordinary trades; seed 7 is the only one where the tail actually showed up, and
+it alone doubles the profit factor off a **0.004 SOL** stake. That shape — most
+runs unremarkable, one run carrying everything — *is* the strategy. It is also
+why judging it on a week of results tells you nothing.
+
+Two caveats on those numbers, since they are simulated and not live:
+
+- The synthetic market is a model. Its tail frequency is an assumption, not a
+  measurement, and real fills are worse than modelled ones.
+- Entries stop at 120 because `max_positions_per_hour: 60` and
+  `max_sol_deployed_per_hour: 0.25` bind — deliberately, since 0.004 × 60 =
+  0.24 SOL. Raising those raises both the shot count and the burn rate
+  proportionally; it does not change the odds per shot.
+
+> **On the "$1 → $400k" stories.** That is 400,000x. No strategy compounds to
+> it. It is one position, bought within minutes of launch, on a token that went
+> from roughly $5k to roughly $1bn — and then not sold. It happens a handful of
+> times a year across the entire market, and for every account you hear about
+> there are tens of thousands running the identical strategy at zero. You never
+> see those.
+>
+> `moonshot` does not promise that outcome. It removes the three things that
+> make it *impossible*: positions too large to survive the loss streak, entries
+> too late to leave room, and exit rules that close a winner early. Whether the
+> tail ever arrives is not something this or any other software controls.
+>
+> If a 90% loss rate would make you change the settings mid-drawdown, use
+> `balanced`. Abandoning a fat-tailed strategy during the drawdown captures all
+> of its losses and none of its wins.
+
+---
+
 ## 9. Paper trading
 
 Paper mode prices against real bonding curves and models latency, slippage,

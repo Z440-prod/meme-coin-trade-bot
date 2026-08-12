@@ -43,6 +43,7 @@ from ..models import (
 )
 from ..providers import ProviderRegistry, Tier
 from ..providers.links import all_token_links, all_wallet_links
+from ..solana.rpc import SolanaRPC
 from .notify import BrowserOpener, Notifier
 from .supervisor import Supervisor
 
@@ -142,7 +143,12 @@ class Console:
         # loop depends on.
         self.registry = ProviderRegistry(config)
         self.graph = EntityGraph()
-        self.intel = IntelEngine(self.registry, self.graph, NarrativeEngine(self.registry))
+        # The Console keeps its own RPC purely for curve-depth lookups in the
+        # terminal; it never trades.
+        self._rpc = SolanaRPC(config.rpc.url, config.rpc.fallback_url, config.rpc.timeout_s)
+        self.intel = IntelEngine(
+            self.registry, self.graph, NarrativeEngine(self.registry), rpc=self._rpc
+        )
 
         self.webhooks = WebhookReceiver(
             WebhookConfig(
@@ -589,6 +595,7 @@ class Console:
         await self.notifier.connect()
 
         try:
+            await self._rpc.connect()
             self.registry.build()
             await self.registry.start()
             coverage = self.registry.coverage_report()
@@ -624,6 +631,8 @@ class Console:
         self.intel.stop()
         with contextlib.suppress(Exception):
             await self.registry.close()
+        with contextlib.suppress(Exception):
+            await self._rpc.close()
         await self.notifier.close()
         await self.db.close()
         await self.bus.close()

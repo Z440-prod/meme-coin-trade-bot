@@ -90,6 +90,34 @@ class ExecutionRouter:
         self.registry = registry
         self.rpc = rpc
         self.routes_chosen: dict[str, int] = {}
+        # Decimals never change for a mint, so this cache is permanent.
+        self._decimals: dict[str, int] = {}
+
+    async def token_decimals(self, mint: str) -> int:
+        """Decimals for a mint, read from its SPL mint account.
+
+        Everything in this class reports **whole tokens**, never raw base
+        units, so both venue branches are directly comparable and the
+        portfolio's accounting cannot silently gain a factor of a million.
+        pump.fun mints are always 6, but graduated tokens and anything routed
+        through Jupiter can be otherwise.
+        """
+        cached = self._decimals.get(mint)
+        if cached is not None:
+            return cached
+
+        decimals = 6  # pump.fun default, and the safest fallback
+        try:
+            data = await self.rpc.get_account_data(mint, commitment="confirmed")
+            if data:
+                from ..solana.checks import decode_mint_account
+
+                decimals = decode_mint_account(data).decimals
+        except Exception as exc:  # noqa: BLE001
+            log.debug("decimals lookup failed for %s (assuming 6): %s", mint, exc)
+
+        self._decimals[mint] = decimals
+        return decimals
 
     @property
     def jupiter(self) -> Any:
@@ -134,10 +162,13 @@ class ExecutionRouter:
 
         d = quote.data or {}
         self._count(Venue.JUPITER)
+        # Jupiter quotes in base units; convert so this matches the curve
+        # branch above, which reports whole tokens.
+        decimals = await self.token_decimals(mint)
         return RouteDecision(
             venue=Venue.JUPITER,
             reason="token has graduated; routing via aggregator",
-            expected_out=d["out_amount"],
+            expected_out=d["out_amount"] / (10**decimals),
             price_impact_pct=d["price_impact_pct"],
             route_labels=d["route_labels"],
             raw_quote=d["raw_quote"],
@@ -173,7 +204,7 @@ class ExecutionRouter:
             )
 
         # Wider slippage on exits: getting out matters more than the price.
-        decimals = 6
+        decimals = await self.token_decimals(mint)
         quote = await jupiter.get_quote(
             mint, SOL_MINT, int(token_amount * (10**decimals)),
             slippage_bps=int(self.config.execution.sell_slippage_pct * 100),

@@ -95,6 +95,36 @@ class Portfolio:
     def open_count(self) -> int:
         return len(self.open_positions)
 
+    @property
+    def at_risk_positions(self) -> list[Position]:
+        """Positions that still have capital at risk.
+
+        A free runner — cost recovered, only the reserved fraction left — is
+        excluded. It cannot lose anything beyond profit already banked, so it
+        consumes no risk budget.
+
+        This matters more than it looks. Runners never close by design, so
+        counting them against `max_concurrent_positions` would mean the bot
+        stops taking new trades once it has accumulated that many winners:
+        the strategy would shut itself down precisely by succeeding.
+        """
+        fraction = self.config.exits.runner_fraction
+        if fraction <= 0:
+            return self.open_positions
+        return [
+            p
+            for p in self.open_positions
+            if not (p.is_runner_only(fraction) and p.cost_recovered)
+        ]
+
+    @property
+    def at_risk_count(self) -> int:
+        return len(self.at_risk_positions)
+
+    @property
+    def free_runner_count(self) -> int:
+        return self.open_count - self.at_risk_count
+
     def holds(self, mint: str) -> bool:
         position = self.positions.get(mint)
         return bool(position and position.state in (PositionState.OPEN, PositionState.OPENING, PositionState.CLOSING))

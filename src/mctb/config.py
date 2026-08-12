@@ -207,6 +207,30 @@ class ExitConfig(BaseModel):
     stagnant_after_s: float = 240.0
     stagnant_min_gain_pct: float = 0.10
 
+    # --- The runner ---------------------------------------------------------
+    # Fraction of the ORIGINAL position that is never sold by time-based,
+    # stagnation or trailing rules once the position has paid for itself.
+    #
+    # This is the mechanism behind every outsized memecoin outcome you have
+    # ever heard about. A 1000x cannot happen if a max-hold timer closes the
+    # position at 15 minutes, and it cannot happen if a trailing stop takes
+    # you out on the first 30% pullback — every large run has several of
+    # those on the way up.
+    #
+    # Set to 0.0 to disable and always fully exit.
+    runner_fraction: float = 0.0
+    # Only let the runner ride once realised proceeds cover the original cost
+    # plus fees. Until then the normal rules apply.
+    #
+    # Leave this true. It is what bounds the downside: once the stake is
+    # recovered the runner is playing with house money and can go to zero
+    # without costing you anything, which is precisely why it can be held
+    # through the drawdowns a real 100x involves.
+    runner_requires_cost_recovered: bool = True
+    # Even a free runner is dumped on a rug signal — salvaging something beats
+    # riding it to zero on purpose.
+    runner_exits_on_rug: bool = True
+
     # Emergency exit triggers — these bypass the ladder and dump immediately.
     exit_on_dev_sell: bool = True
     exit_on_migration: bool = False

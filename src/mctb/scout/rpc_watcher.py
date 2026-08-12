@@ -14,19 +14,85 @@ third-party quote.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import struct
 import time
 from collections.abc import Callable
 from typing import Any
 
 import websockets
 
-from ..models import NewTokenEvent
-from ..solana.curve import PUMP_PROGRAM_ID
+from ..models import NewTokenEvent, TradeEvent
+from ..solana.curve import LAMPORTS_PER_SOL, PUMP_PROGRAM_ID, TOKEN_UNIT, _b58encode
 from ..solana.rpc import SolanaRPC
 
 log = logging.getLogger(__name__)
+
+# Anchor emits events as base64 in a `Program data:` log line, prefixed with
+# an 8-byte discriminator: sha256("event:TradeEvent")[:8].
+TRADE_EVENT_DISCRIMINATOR = bytes.fromhex("bddb7fd34ee661ee")
+
+# Layout after the discriminator (little-endian):
+#   0..32   mint pubkey
+#   32..40  sol_amount            u64
+#   40..48  token_amount          u64
+#   48      is_buy                bool
+#   49..81  user pubkey
+#   81..89  timestamp             i64
+#   89..97  virtual_sol_reserves  u64
+#   97..105 virtual_token_reserves u64
+#   (newer program versions append more fields; we ignore the tail)
+_TRADE_MIN_LEN = 8 + 105
+
+
+def parse_trade_event(payload: bytes) -> TradeEvent | None:
+    """Decode a pump.fun TradeEvent from an Anchor `Program data:` payload.
+
+    **This is what makes the free tier work at all.** PumpPortal's per-token
+    trade stream is a metered feature — without an API key the server replies
+    "only available when connecting with an API key" and silently delivers
+    nothing. That leaves the Scout with new-token events and no buyers, no
+    buy/sell ratio and no velocity, so nothing ever scores highly enough to
+    become a candidate.
+
+    The same trades are already in the program logs we subscribe to for free,
+    so we decode them here. Costs no extra RPC calls — the data is inline in
+    the log payload we are receiving anyway.
+    """
+    if len(payload) < _TRADE_MIN_LEN:
+        return None
+    if payload[:8] != TRADE_EVENT_DISCRIMINATOR:
+        return None
+
+    try:
+        body = payload[8:]
+        mint = _b58encode(body[0:32])
+        sol_amount, token_amount = struct.unpack_from("<QQ", body, 32)
+        is_buy = bool(body[48])
+        user = _b58encode(body[49:81])
+        virtual_sol, virtual_tokens = struct.unpack_from("<QQ", body, 89)
+    except Exception:  # noqa: BLE001
+        return None
+
+    # Sanity: a mis-parse produces absurd numbers, and acting on those would
+    # be worse than dropping the event.
+    if sol_amount > 1_000_000 * LAMPORTS_PER_SOL or virtual_tokens == 0:
+        return None
+
+    return TradeEvent(
+        source="rpc_watcher",
+        mint=mint,
+        trader=user,
+        is_buy=is_buy,
+        sol_amount=sol_amount / LAMPORTS_PER_SOL,
+        token_amount=token_amount / TOKEN_UNIT,
+        # Virtual reserves are what the curve prices against; real reserves
+        # are read separately when a token is actually evaluated.
+        sol_in_curve=virtual_sol / LAMPORTS_PER_SOL,
+        market_cap_sol=0.0,
+    )
 
 
 class RpcWatcher:
@@ -37,15 +103,18 @@ class RpcWatcher:
         ws_url: str,
         rpc: SolanaRPC,
         on_new_token: Callable[[NewTokenEvent], Any] | None = None,
+        on_trade: Callable[[TradeEvent], Any] | None = None,
         enabled: bool = True,
     ) -> None:
         self.ws_url = ws_url
         self.rpc = rpc
         self.on_new_token = on_new_token
+        self.on_trade = on_trade
         self.enabled = enabled
         self._running = False
         self._seen: dict[str, float] = {}
 
+        self.trades_parsed = 0
         self.logs_received = 0
         self.last_log_ts = 0.0
         self.connected = False
@@ -117,6 +186,21 @@ class RpcWatcher:
         self.logs_received += 1
         self.last_log_ts = time.time()
 
+        # Decode any trade events carried in these logs. Free, and the only
+        # source of trade data when there is no PumpPortal API key.
+        if self.on_trade is not None:
+            for line in logs:
+                if not line.startswith("Program data: "):
+                    continue
+                try:
+                    payload = base64.b64decode(line[14:], validate=False)
+                except Exception:  # noqa: BLE001
+                    continue
+                trade = parse_trade_event(payload)
+                if trade is not None:
+                    self.trades_parsed += 1
+                    asyncio.create_task(_maybe_await(self.on_trade, trade))
+
         # The program emits this exact log line on token creation.
         if not any("Instruction: Create" in line for line in logs):
             return
@@ -185,6 +269,15 @@ class RpcWatcher:
 
     async def stop(self) -> None:
         self._running = False
+
+
+async def _maybe_await(fn: Callable[..., Any], *args: Any) -> None:
+    try:
+        result = fn(*args)
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:  # noqa: BLE001
+        log.debug("rpc watcher callback failed: %s", exc)
 
 
 class PriceOracle:

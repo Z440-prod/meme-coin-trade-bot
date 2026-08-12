@@ -137,16 +137,24 @@ def evaluate_intel(
                 f"intel: {fresh_ratio:.0%} of these wallets were created in the last 24h"
             )
 
-    # Insider clusters found during dossier assembly.
+    # Insider and fresh-wallet findings from dossier assembly. These read the
+    # structured fields — `cluster_warnings` is prose for humans and parsing it
+    # would break silently the moment the wording changed.
     for warning in dossier.cluster_warnings:
         verdict.notes.append(warning)
-        if "insider" in warning.lower():
-            try:
-                pct = float(warning.split("(")[1].split("%")[0])
-                if pct / 100.0 > cfg.max_insider_ratio:
-                    verdict.blockers.append(f"intel: {warning}")
-            except (IndexError, ValueError):
-                pass
+
+    if dossier.insider_count > 0 and dossier.insider_pct > cfg.max_insider_ratio:
+        verdict.blockers.append(
+            f"intel: {dossier.insider_count} likely insider wallets "
+            f"({dossier.insider_pct:.0%} of buyers, limit {cfg.max_insider_ratio:.0%}) "
+            "— the deployer funded the buyers"
+        )
+
+    if dossier.fresh_wallet_pct > cfg.max_fresh_wallet_ratio:
+        verdict.blockers.append(
+            f"intel: {dossier.fresh_wallet_pct:.0%} of buyers are wallets "
+            f"created in the last 24h (limit {cfg.max_fresh_wallet_ratio:.0%})"
+        )
 
     # --- Graded adjustments ------------------------------------------------
     adjustment = 0.0

@@ -96,7 +96,10 @@ class Brain:
         self.registry = ProviderRegistry(config)
         self.graph = EntityGraph()
         self.intel = IntelEngine(
-            self.registry, self.graph, NarrativeEngine(self.registry, config.intel.narrative_ttl_s)
+            self.registry,
+            self.graph,
+            NarrativeEngine(self.registry, config.intel.narrative_ttl_s),
+            rpc=self.rpc,
         )
         self.router = ExecutionRouter(config, self.registry, self.rpc)
         self.notifier = OutboundNotifier(
@@ -151,7 +154,13 @@ class Brain:
                 log.error("intel stack failed to start (continuing without it): %s", exc)
         await self.notifier.start()
 
-        executor = await build_executor(self.config, self.rpc, self.oracle)
+        # The router is handed to the executor so graduated tokens stay
+        # tradeable. Without it, a token completing its bonding curve becomes
+        # unsellable — and graduation is what happens to the winners.
+        executor = await build_executor(
+            self.config, self.rpc, self.oracle,
+            router=self.router if self.config.intel.enabled else None,
+        )
         self.portfolio = Portfolio(self.config, self.db, executor, self.oracle, self.edge)
         self.portfolio.on_fill = self._publish_fill
         self.portfolio.on_position_closed = self._on_position_closed
@@ -268,6 +277,13 @@ class Brain:
     async def _consider(self, candidate: Candidate) -> None:
         assert self.portfolio is not None
         self.candidates_seen += 1
+
+        # Record the wallets that triggered this candidate. These are exactly
+        # the addresses the sybil check needs to reason about, and the Scout
+        # already did the work of identifying them.
+        if self.config.intel.enabled and candidate.smart_wallets:
+            for wallet in candidate.smart_wallets:
+                self.graph.observe_buy(wallet, candidate.mint, candidate.ts)
 
         # 1. Hard gates — cheap, and they veto outright.
         recently = await self.db.recent_mint_trade(
@@ -408,7 +424,8 @@ class Brain:
             return
 
         risk_result = self.risk.check(
-            open_positions=self.portfolio.open_count,
+            # Free runners hold no capital at risk and must not block new entries.
+            open_positions=self.portfolio.at_risk_count,
             bankroll_sol=bankroll,
             daily_pnl_sol=self.portfolio.daily_pnl_sol,
             proposed_size_sol=size,
@@ -538,6 +555,15 @@ class Brain:
                 if not isinstance(message, TradeEvent):
                     continue
 
+                # Feed the entity graph FIRST, before any position filter.
+                # Clustering is only useful if it has seen buyers on tokens we
+                # are still evaluating — by the time we hold something, the
+                # decision it would have informed has already been made.
+                if message.is_buy and message.trader:
+                    self.graph.observe_buy(
+                        message.trader, message.mint, message.ts, message.sol_amount
+                    )
+
                 position = self.portfolio.positions.get(message.mint)
                 if position is None:
                     continue
@@ -554,12 +580,6 @@ class Brain:
                         self.portfolio.note_dev_sell(message.mint)
                     elif message.trader in position.smart_wallets:
                         self.portfolio.note_smart_exit(message.mint)
-                elif message.trader:
-                    # Feed the entity graph. Every observed buy is evidence
-                    # about who is coordinating with whom.
-                    self.graph.observe_buy(
-                        message.trader, message.mint, message.ts, message.sol_amount
-                    )
             except Exception as exc:  # noqa: BLE001
                 log.debug("market event handling error: %s", exc)
 

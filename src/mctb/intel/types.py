@@ -233,6 +233,12 @@ class TokenDossier(BaseModel):
     smart_wallets: list[WalletIntel] = Field(default_factory=list)
     cluster_warnings: list[str] = Field(default_factory=list)
 
+    # Structured entity findings. The gate reads these numbers directly —
+    # `cluster_warnings` is prose for humans and must never be parsed.
+    insider_pct: float = 0.0
+    insider_count: int = 0
+    fresh_wallet_pct: float = 0.0
+
     links: dict[str, str] = Field(default_factory=dict)
     assembled_at: float = Field(default_factory=time.time)
     assembly_ms: float = 0.0

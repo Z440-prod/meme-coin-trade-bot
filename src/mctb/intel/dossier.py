@@ -79,10 +79,14 @@ class IntelEngine:
         registry: ProviderRegistry,
         graph: EntityGraph | None = None,
         narrative: NarrativeEngine | None = None,
+        rpc: Any = None,
     ) -> None:
         self.registry = registry
         self.graph = graph or EntityGraph()
         self.narrative = narrative or NarrativeEngine(registry)
+        # Optional. Lets market fusion recover liquidity for tokens still on a
+        # bonding curve, where DEX aggregators correctly report zero.
+        self.rpc = rpc
         self.store = DossierStore()
 
         self._enrich_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=1000)
@@ -156,7 +160,10 @@ class IntelEngine:
                 fuse_security(self.registry, mint, max_tier=tier, timeout_s=budget * 0.8)
             ),
             "market": asyncio.create_task(
-                fuse_market(self.registry, mint, max_tier=tier, timeout_s=budget * 0.6)
+                fuse_market(
+                    self.registry, mint, max_tier=tier,
+                    timeout_s=budget * 0.6, rpc=self.rpc,
+                )
             ),
         }
         if include_narrative and tier.value >= Tier.COLD.value:
@@ -191,17 +198,22 @@ class IntelEngine:
             if buyers:
                 _unique, warnings = self.graph.deduplicate(buyers)
                 dossier.cluster_warnings.extend(warnings)
-                fresh = self.graph.fresh_wallet_ratio(buyers)
-                if fresh > 0.6:
+                dossier.fresh_wallet_pct = self.graph.fresh_wallet_ratio(buyers)
+                if dossier.fresh_wallet_pct > 0.6:
                     dossier.cluster_warnings.append(
-                        f"{fresh:.0%} of buyers are wallets created in the last 24h"
+                        f"{dossier.fresh_wallet_pct:.0%} of buyers are wallets "
+                        "created in the last 24h"
                     )
             if creator:
                 insider = self.graph.insider_risk(mint, creator)
-                if insider["insider_count"] > 0:
+                # Structured, so the gate never has to parse prose.
+                dossier.insider_count = int(insider["insider_count"])
+                dossier.insider_pct = float(insider["insider_pct"])
+                if dossier.insider_count > 0:
+                    reason = insider["reasons"][0] if insider["reasons"] else ""
                     dossier.cluster_warnings.append(
-                        f"{insider['insider_count']} likely insider wallets "
-                        f"({insider['insider_pct']:.0%} of buyers): {insider['reasons'][0] if insider['reasons'] else ''}"
+                        f"{dossier.insider_count} likely insider wallets "
+                        f"({dossier.insider_pct:.0%} of buyers): {reason}"
                     )
 
         dossier.links = all_token_links(mint)

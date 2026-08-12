@@ -1,0 +1,178 @@
+# =============================================================================
+#  MOONSHOT — built for asymmetry, not for win rate.
+#
+#  READ THIS BEFORE USING IT.
+#
+#  This preset exists because of a specific question: "make it like the bot
+#  that turned $1 into $400k." So here is the honest arithmetic behind that
+#  kind of outcome.
+#
+#  $1 -> $400,000 is 400,000x. No trading strategy compounds to that in two
+#  months. What produces it is ONE position, entered within minutes of launch,
+#  on a token that went from roughly $5k market cap to roughly $1bn — and then
+#  NOT SOLD through the entire ride. That happens a handful of times a year
+#  across the whole market, and for every account you hear about there are
+#  tens of thousands, running the same strategy, at zero. You never see those.
+#
+#  So this preset does not promise that outcome. It makes it STRUCTURALLY
+#  POSSIBLE, which the other presets do not, by fixing the three things that
+#  otherwise guarantee it can never happen:
+#
+#    1. POSITION SIZE. Tiny, so a long run of total losses cannot end you.
+#       You need to survive hundreds of zeros to still be there for the one.
+#
+#    2. ENTRY TIMING. Early, small curves. A token already at 50 SOL cannot
+#       do 1000x from there. This means buying things that are mostly rugs.
+#
+#    3. THE RUNNER — the important one. Sell enough on the way up to get your
+#       stake back, then never sell the rest. Every large run contains 40-60%
+#       drawdowns; a trailing stop or a max-hold timer exits into the first
+#       one and turns a would-be 1000x into a 3x. `runner_fraction` below
+#       switches those rules off once the position has paid for itself.
+#
+#  EXPECTED SHAPE: a very low win rate (5-15%), most positions going to
+#  approximately zero, and a P&L curve that is flat-to-down for long stretches
+#  punctuated by rare large outliers. Judged by win rate this looks terrible.
+#  Judged by expectancy it may not be. You will not know which for months.
+#
+#  If a 90% loss rate would make you change the settings, use `balanced`
+#  instead. Changing a fat-tailed strategy mid-drawdown is how you capture all
+#  of the losses and none of the wins.
+#
+#  Start on PAPER. Fund with an amount whose total loss is genuinely fine.
+# =============================================================================
+
+gates:
+  # Very early. Still enforces the minimum age that keeps you out of the
+  # bundler-dominated first seconds where you are simply exit liquidity.
+  min_age_s: 5.0
+  max_age_s: 420.0
+
+  # The whole point: a token at 40 SOL of curve depth cannot 1000x from where
+  # you bought. Entering under ~8 SOL is what leaves that room.
+  min_sol_in_curve: 0.8
+  max_sol_in_curve: 25.0
+
+  # Loose — a token this young genuinely has few buyers, and demanding more
+  # means always arriving after the move.
+  min_unique_buyers: 3
+  min_buy_sell_ratio: 1.1
+
+  # NEVER relaxed, at any aggression level. These are not risk trade-offs,
+  # they are checks for whether the token can be sold at all. A frozen or
+  # infinitely-mintable token is worth zero regardless of what the chart does.
+  require_mint_authority_revoked: true
+  require_freeze_authority_revoked: true
+
+  # Loose but not absent. A creator holding 25% can end the run alone.
+  max_dev_holding_pct: 0.12
+  max_top10_holding_pct: 0.55
+  max_bundle_pct: 0.40
+
+  block_known_rug_creators: true
+  require_smart_wallet: false
+  name_blocklist: []
+
+scoring:
+  # Momentum and early smart money matter most this early; holder
+  # distribution and social matter less because there is barely any yet.
+  w_smart_wallets: 28.0
+  w_buy_pressure: 18.0
+  w_unique_buyers: 6.0
+  w_curve_progress: 6.0
+  w_holder_distribution: 8.0
+  w_social: 8.0
+  w_velocity: 28.0
+  w_creator_history: 8.0
+
+  # Low, deliberately. At this size you want breadth of shots, not selectivity.
+  entry_threshold: 48.0
+
+  personal_edge_enabled: true
+  personal_edge_max_adjust: 18.0
+  personal_edge_min_samples: 15
+
+risk:
+  # THE SURVIVAL PARAMETER.
+  #
+  # 0.004 SOL per shot means a 1 SOL bankroll survives ~250 consecutive total
+  # losses. At a 10% hit rate you would expect a loss streak of 20+ to happen
+  # regularly, and streaks of 50 to happen sometimes. Sizing that survives
+  # those is the entire reason this strategy can work at all.
+  #
+  # Raising this is the fastest way to guarantee failure: you get the same
+  # low hit rate with far fewer attempts, and go broke before the tail arrives.
+  max_position_sol: 0.004
+  position_pct_of_bankroll: 0.004
+  min_sol_reserve: 0.05
+
+  # Many concurrent shots. Runners accumulate here and stay open indefinitely,
+  # so this needs headroom or new entries get blocked by old free runners.
+  max_concurrent_positions: 12
+  max_positions_per_hour: 60
+  max_sol_deployed_per_hour: 0.25
+
+  # Wide, because a flat or losing week is the normal state of this strategy
+  # and a tight daily limit would halt you permanently.
+  daily_loss_limit_sol: 0.15
+  consecutive_loss_limit: 40
+  cooldown_after_halt_s: 1800
+  same_mint_cooldown_s: 3600
+
+exits:
+  # Wide. At this entry point a 45% drawdown is routine noise, not a signal.
+  stop_loss_pct: 0.55
+
+  # Recover the stake FAST, then stop selling.
+  #
+  # 2x sells 55% — that alone returns more than the cost after fees, so the
+  # position is free almost immediately. 5x trims a little more profit. Then
+  # nothing else ever sells, and the remaining 30% rides.
+  #
+  # 30% of a position that does 1000x is a 300x on the whole position. That
+  # is the arithmetic this preset exists for.
+  take_profit_ladder:
+    - { multiple: 2.0,  fraction: 0.55 }
+    - { multiple: 5.0,  fraction: 0.15 }
+
+  # THE RUNNER. 30% of every position is never sold by time, stagnation or
+  # trailing rules once the stake is back. Only a rug signal empties it.
+  runner_fraction: 0.30
+  runner_requires_cost_recovered: true
+  runner_exits_on_rug: true
+
+  # These still apply to the non-runner portion.
+  trailing_activate_pct: 1.0
+  trailing_distance_pct: 0.45
+  max_hold_s: 1800
+  stagnant_after_s: 420
+  stagnant_min_gain_pct: 0.20
+
+  exit_on_dev_sell: true
+  exit_on_smart_wallet_exit: false   # smart money exiting early is normal here
+  stale_price_exit_s: 120
+
+execution:
+  # Thin early curves move hard against you; too tight a slippage limit means
+  # your transaction simply fails and you miss the entry entirely.
+  buy_slippage_pct: 25.0
+  sell_slippage_pct: 40.0
+  priority_fee_sol: 0.0015
+  exit_priority_fee_sol: 0.004
+
+intel:
+  # Still refuse anything unsellable or obviously manufactured. Being early is
+  # the risk being taken here; buying a honeypot is not a risk, it is a
+  # guaranteed loss with no upside branch at all.
+  require_sellable: true
+  max_round_trip_cost_pct: 35.0
+  max_wash_suspicion: 0.75
+  max_sybil_ratio: 0.6
+  max_fresh_wallet_ratio: 0.85
+  max_insider_ratio: 0.35
+
+llm:
+  # Too slow to consult at this entry speed; still runs the nightly review,
+  # which is where it is most useful anyway.
+  min_score_to_consult: 95.0
+  timeout_s: 3.0

@@ -45,12 +45,24 @@ out = RichConsole()
 
 # Outcome archetypes: (label, probability, peak multiple range, seconds to peak,
 # floor multiple the price decays to).
+#
+# The `generational` row matters more than its probability suggests. Without a
+# representable fat tail, a simulator structurally cannot evaluate any strategy
+# whose entire thesis is catching one — it would show `moonshot` losing slowly
+# and `balanced` winning slowly, every time, purely as an artefact of the
+# distribution rather than of the strategies.
+#
+# 1-in-400 at 100-2000x is roughly the observed shape of "a launch that reaches
+# nine figures". It is a rough estimate, not a measurement, and the whole
+# distribution below is my construction rather than fitted history. Treat sim
+# results as a coherence check on your config, never as evidence of edge.
 ARCHETYPES = [
     ("instant_rug", 0.34, (0.6, 1.1), (5, 40), (0.01, 0.05)),
-    ("slow_bleed", 0.30, (1.0, 1.6), (30, 180), (0.15, 0.45)),
+    ("slow_bleed", 0.2975, (1.0, 1.6), (30, 180), (0.15, 0.45)),
     ("modest_pump", 0.22, (1.6, 3.0), (60, 400), (0.4, 1.1)),
     ("strong_run", 0.11, (3.0, 9.0), (120, 700), (0.8, 2.5)),
     ("moonshot", 0.03, (9.0, 45.0), (200, 1100), (1.5, 8.0)),
+    ("generational", 0.0025, (100.0, 2000.0), (900, 7200), (20.0, 400.0)),
 ]
 
 
@@ -276,7 +288,7 @@ async def run_simulation(config: Config, tokens: int = 60, seed: int = 42) -> di
     await edge.load()
 
     scorer = Scorer(config, edge)
-    risk = RiskGate(config)
+    risk = RiskGate(config, clock=lambda: executor.clock)
 
     start = time.time()
     executor.clock = start
@@ -289,8 +301,11 @@ async def run_simulation(config: Config, tokens: int = 60, seed: int = 42) -> di
     gate_reasons: dict[str, int] = {}
 
     # Virtual clock: 1 simulated second per step, launches arriving over time.
-    total_steps = 2400
-    launch_steps = sorted(random.sample(range(0, total_steps - 400), tokens))
+    # Long enough for a multi-hour runner to play out. A shorter horizon
+    # would force-close every tail at 'simulation_end' and make any
+    # runner-based strategy look broken.
+    total_steps = 14_400
+    launch_steps = sorted(random.sample(range(0, max(1, total_steps - 7200)), tokens))
     launch_index = 0
 
     for step in range(total_steps):
@@ -332,7 +347,7 @@ async def run_simulation(config: Config, tokens: int = 60, seed: int = 42) -> di
             bankroll = await portfolio.bankroll()
             size = scorer.size_position(scored.score, bankroll)
             risk_result = risk.check(
-                open_positions=portfolio.open_count,
+                open_positions=portfolio.at_risk_count,
                 bankroll_sol=bankroll,
                 daily_pnl_sol=portfolio.daily_pnl_sol,
                 proposed_size_sol=size,

@@ -294,6 +294,32 @@ class Position(BaseModel):
         end = self.closed_at or now_ts()
         return end - self.opened_at
 
+    # --- Runner state -------------------------------------------------------
+
+    @property
+    def cost_recovered(self) -> bool:
+        """Has this position already paid back what it cost?
+
+        Once true, everything still held is house money: it can go to zero
+        without costing anything beyond profit already banked. That is what
+        makes it rational to hold a runner through the 40% drawdowns that
+        every genuine 100x contains.
+        """
+        return self.realised_sol >= (self.cost_sol + self.fees_sol)
+
+    def runner_tokens(self, runner_fraction: float) -> float:
+        """How many tokens are reserved as the never-sold runner."""
+        if runner_fraction <= 0:
+            return 0.0
+        return self.tokens_bought * runner_fraction
+
+    def is_runner_only(self, runner_fraction: float) -> bool:
+        """True when what remains is the runner and nothing more."""
+        if runner_fraction <= 0:
+            return False
+        # A little tolerance for fee dust and partial-fill rounding.
+        return self.tokens_held <= self.runner_tokens(runner_fraction) * 1.02
+
 
 class WalletStat(BaseModel):
     """Reputation of a wallet we might copy.
